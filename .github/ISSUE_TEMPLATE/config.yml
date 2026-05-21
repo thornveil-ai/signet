@@ -1,16 +1,16 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/jeranaias/signet/security/advisories/new
+    url: https://github.com/thornveil-ai/signet/security/advisories/new
     about: |
       Found a security issue? Please open a private security advisory rather
       than a public issue. Acknowledgement within 3 business days.
   - name: Documentation site
-    url: https://jeranaias.github.io/signet/
+    url: https://thornveil-ai.github.io/signet/
     about: |
       Looking for how to install, configure, write a plugin, or read the
       threat model? The docs site has the full reference.
   - name: Discussions
-    url: https://github.com/jeranaias/signet/discussions
+    url: https://github.com/thornveil-ai/signet/discussions
     about: |
       Have a question that's not a bug or a feature request? Start a discussion.

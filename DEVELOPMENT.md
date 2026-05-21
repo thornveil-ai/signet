@@ -3,7 +3,7 @@
 ## Setup
 
 ```bash
-git clone https://github.com/jeranaias/signet
+git clone https://github.com/thornveil-ai/signet
 cd signet
 python -m venv .venv
 source .venv/bin/activate           # Windows: .venv\Scripts\activate

@@ -2,9 +2,9 @@
 # Drives a small but real signal of "this project is maintained."
 
 # GitHub Sponsors is the simplest path; uncomment once enabled on the user/org
-# github: jeranaias
+# github: thornveil-ai
 
 # Generic links work today without any signup. Pointing at Thornveil's
 # engagement contact is appropriate for the OSS+commercial-support model.
 custom:
-  - "https://github.com/jeranaias/signet#when-you-need-more-than-the-oss"
+  - "https://github.com/thornveil-ai/signet#when-you-need-more-than-the-oss"

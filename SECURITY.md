@@ -4,9 +4,9 @@
 
 **Do not open a public GitHub issue.**
 
-Preferred channel: open a [private security advisory](https://github.com/jeranaias/signet/security/advisories/new). GitHub coordinates the disclosure timeline and notifies maintainers without exposing the report.
+Preferred channel: open a [private security advisory](https://github.com/thornveil-ai/signet/security/advisories/new). GitHub coordinates the disclosure timeline and notifies maintainers without exposing the report.
 
-Backup channel: `jeranaias@gmail.com` (subject prefix `[signet-security]`). Until the project has a hosted domain, this single inbox is the only out-of-band path; expect occasional delays.
+Backup channel: `jesse@thornveil.ai` (subject prefix `[signet-security]`). Until the project has a hosted domain, this single inbox is the only out-of-band path; expect occasional delays.
 
 Include:
 
@@ -89,7 +89,7 @@ For production deployments:
 5. **Multi-worker uvicorn deployments** must use `signet.audit.backend.FileLockingJsonlBackend` (cross-process locking) and pass `HmacChain(cache_prev=False)`. The default `JsonlBackend` is single-writer; pairing the locking backend with `cache_prev=False` makes `uvicorn --workers N>1` safe.
 6. Cap inbound body size at the reverse-proxy layer too. signet enforces `SIGNET_MAX_REQUEST_BODY_BYTES` (default 4 MiB) but defense in depth.
 7. Run the audit verifier nightly via cron: `signet audit verify <log> --hmac-secret <secret>`.
-8. Subscribe to releases (https://github.com/jeranaias/signet/releases) so you see security advisories.
+8. Subscribe to releases (https://github.com/thornveil-ai/signet/releases) so you see security advisories.
 
 ## Disclosure policy
 

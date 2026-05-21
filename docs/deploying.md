@@ -168,7 +168,7 @@ implementation that satisfies the same contract and pass it via a
 custom subclass.
 
 This is one of the genuine "you'll want signet support for this"
-items — see [the README's "When you need more than the OSS" section](https://github.com/jeranaias/signet#when-you-need-more-than-the-oss)
+items — see [the README's "When you need more than the OSS" section](https://github.com/thornveil-ai/signet#when-you-need-more-than-the-oss)
 if you'd rather have it engineered.
 
 ## Probe wiring

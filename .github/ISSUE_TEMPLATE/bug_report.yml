@@ -10,7 +10,7 @@ body:
         faster we can fix it.
 
         For security vulnerabilities, please do NOT open a public issue. See
-        [SECURITY.md](https://github.com/jeranaias/signet/blob/main/SECURITY.md)
+        [SECURITY.md](https://github.com/thornveil-ai/signet/blob/main/SECURITY.md)
         for the private reporting channel.
   - type: input
     id: version

@@ -6,7 +6,7 @@ replicaCount: 2
 image:
   # Reference image. Build your own from examples/docker-compose/Dockerfile.signet
   # or pin a registry that mirrors signet-sign==<appVersion>.
-  repository: ghcr.io/jeranaias/signet
+  repository: ghcr.io/thornveil-ai/signet
   tag: ""  # defaults to .Chart.AppVersion
   pullPolicy: IfNotPresent
 

@@ -8,7 +8,7 @@ Be decent. Disagreement is welcome; harassment is not. The maintainers will remo
 
 ## Reporting
 
-Conduct concerns: jeranaias@gmail.com. Reports are handled privately.
+Conduct concerns: jesse@thornveil.ai. Reports are handled privately.
 
 ## Scope
 

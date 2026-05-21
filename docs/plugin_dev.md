@@ -127,7 +127,7 @@ Both are intentionally minimal. Production-grade implementations of the same pat
 1. Standard Python packaging: `python -m build` produces sdist + wheel.
 2. Publish to PyPI: `twine upload dist/*`.
 3. Add the `signet-plugin` topic to your GitHub repo so other signet users can find it.
-4. Open an issue in jeranaias/signet to add your plugin to the community list (optional).
+4. Open an issue in thornveil-ai/signet to add your plugin to the community list (optional).
 
 ## Contributing reference plugins back to signet
 

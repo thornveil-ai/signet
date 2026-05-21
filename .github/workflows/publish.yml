@@ -60,7 +60,7 @@ jobs:
     #
     # Setup (one-time, manual): on the PyPI project page, add a
     # Trusted Publisher with:
-    #   Owner:           jeranaias
+    #   Owner:           thornveil-ai
     #   Repository:      signet
     #   Workflow:        publish.yml
     #   Environment:     (leave blank unless using an environment)

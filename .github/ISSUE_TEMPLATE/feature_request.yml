@@ -11,7 +11,7 @@ body:
         Before opening, a quick sanity check: is this something that fits in
         signet's scope (the architectural gate pattern), or is it a separate
         plugin? If it's plugin-shaped, the
-        [plugin development guide](https://jeranaias.github.io/signet/plugin_dev/)
+        [plugin development guide](https://thornveil-ai.github.io/signet/plugin_dev/)
         is the better starting point.
   - type: textarea
     id: problem

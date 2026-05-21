@@ -5,7 +5,7 @@ Thanks for your interest. signet is Apache-2.0 OSS — contributions of any size
 ## Quick start
 
 ```bash
-git clone https://github.com/jeranaias/signet
+git clone https://github.com/thornveil-ai/signet
 cd signet
 python -m venv .venv
 source .venv/bin/activate     # Windows: .venv\Scripts\activate
@@ -88,11 +88,11 @@ your_check = "your_pkg.module:YourCheck"
 
 The reference plugins (`signet.plugins.tribunal`, `signet.plugins.sandbox`) live in this repo as built-in examples. Most production plugins should ship as their own packages.
 
-See [`docs/plugin_dev.md`](https://github.com/jeranaias/signet/blob/main/docs/plugin_dev.md).
+See [`docs/plugin_dev.md`](https://github.com/thornveil-ai/signet/blob/main/docs/plugin_dev.md).
 
 ## Reporting security issues
 
-Do not file public issues for vulnerabilities. See [`SECURITY.md`](https://github.com/jeranaias/signet/blob/main/SECURITY.md).
+Do not file public issues for vulnerabilities. See [`SECURITY.md`](https://github.com/thornveil-ai/signet/blob/main/SECURITY.md).
 
 ## License
 
@@ -100,4 +100,4 @@ By contributing, you agree your contribution is licensed under Apache-2.0, the s
 
 ## Code of conduct
 
-See [`CODE_OF_CONDUCT.md`](https://github.com/jeranaias/signet/blob/main/CODE_OF_CONDUCT.md).
+See [`CODE_OF_CONDUCT.md`](https://github.com/thornveil-ai/signet/blob/main/CODE_OF_CONDUCT.md).

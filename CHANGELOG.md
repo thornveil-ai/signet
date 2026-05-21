@@ -75,7 +75,7 @@ confidence cycle.
 
   **Operator action required before next tag push**: on the PyPI
   project page (`pypi.org/manage/account/publishing/`), add a
-  Trusted Publisher binding with `owner=jeranaias`,
+  Trusted Publisher binding with `owner=thornveil-ai`,
   `repository=signet`, `workflow=publish.yml`. The previous
   API-token path can be temporarily restored by re-adding the
   `password:` parameter to the `pypa/gh-action-pypi-publish` step if
@@ -1349,7 +1349,7 @@ reflects what v0.1.3 actually shipped. No code changes.
 - **Docs site nav** keeps Contributing / Security / Changelog
   inside the site (mkdocs `pymdownx.snippets` mirrors the canonical
   root files; GitHub keeps auto-discovering the originals). README
-  gets explicit "📚 Documentation: jeranaias.github.io/signet" link
+  gets explicit "📚 Documentation: thornveil-ai.github.io/signet" link
   with PyPI / docs / license / Python badges at the top.
 - `CONTRIBUTING.md` internal links upgraded to absolute GitHub URLs
   so they resolve cleanly in both the repo browser and the included
@@ -1713,12 +1713,12 @@ Test count: 220 unit + adversarial green. mypy clean. ruff clean.
 - Test matrix: Python 3.11 / 3.12 / 3.13 × Linux / macOS / Windows = 9 jobs per push
 - mkdocs-material site builds + deploys to GitHub Pages
 
-[Unreleased]: https://github.com/jeranaias/signet/compare/v0.1.7...HEAD
-[0.1.7]: https://github.com/jeranaias/signet/releases/tag/v0.1.7
-[0.1.6]: https://github.com/jeranaias/signet/releases/tag/v0.1.6
-[0.1.5]: https://github.com/jeranaias/signet/releases/tag/v0.1.5
-[0.1.4]: https://github.com/jeranaias/signet/releases/tag/v0.1.4
-[0.1.3]: https://github.com/jeranaias/signet/releases/tag/v0.1.3
-[0.1.2]: https://github.com/jeranaias/signet/releases/tag/v0.1.2
-[0.1.1]: https://github.com/jeranaias/signet/releases/tag/v0.1.1
-[0.1.0]: https://github.com/jeranaias/signet/releases/tag/v0.1.0
+[Unreleased]: https://github.com/thornveil-ai/signet/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/thornveil-ai/signet/releases/tag/v0.1.7
+[0.1.6]: https://github.com/thornveil-ai/signet/releases/tag/v0.1.6
+[0.1.5]: https://github.com/thornveil-ai/signet/releases/tag/v0.1.5
+[0.1.4]: https://github.com/thornveil-ai/signet/releases/tag/v0.1.4
+[0.1.3]: https://github.com/thornveil-ai/signet/releases/tag/v0.1.3
+[0.1.2]: https://github.com/thornveil-ai/signet/releases/tag/v0.1.2
+[0.1.1]: https://github.com/thornveil-ai/signet/releases/tag/v0.1.1
+[0.1.0]: https://github.com/thornveil-ai/signet/releases/tag/v0.1.0

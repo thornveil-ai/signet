@@ -19,7 +19,7 @@ keep review fast and predictable.
 
 ## Checklist
 
-- [ ] I read [CONTRIBUTING.md](https://github.com/jeranaias/signet/blob/main/CONTRIBUTING.md)
+- [ ] I read [CONTRIBUTING.md](https://github.com/thornveil-ai/signet/blob/main/CONTRIBUTING.md)
 - [ ] Tests added or updated for the change
 - [ ] `pytest tests/unit tests/adversarial -q` passes locally
 - [ ] `ruff check src tests` and `ruff format --check src tests` pass

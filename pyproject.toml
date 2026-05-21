@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [
-    { name = "Jesse Morgan", email = "jeranaias@gmail.com" },
+    { name = "Jesse Morgan", email = "jesse@thornveil.ai" },
 ]
 keywords = [
     "agent",
@@ -98,11 +98,11 @@ docs = [
 signet = "signet.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/jeranaias/signet"
-Documentation = "https://jeranaias.github.io/signet"
-Repository = "https://github.com/jeranaias/signet"
-Issues = "https://github.com/jeranaias/signet/issues"
-Changelog = "https://github.com/jeranaias/signet/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/thornveil-ai/signet"
+Documentation = "https://thornveil-ai.github.io/signet"
+Repository = "https://github.com/thornveil-ai/signet"
+Issues = "https://github.com/thornveil-ai/signet/issues"
+Changelog = "https://github.com/thornveil-ai/signet/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/signet"]

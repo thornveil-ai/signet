@@ -1,7 +1,7 @@
 # signet
 
 [![PyPI](https://img.shields.io/pypi/v/signet-sign.svg)](https://pypi.org/project/signet-sign/)
-[![Docs](https://img.shields.io/badge/docs-jeranaias.github.io-blue)](https://jeranaias.github.io/signet/)
+[![Docs](https://img.shields.io/badge/docs-thornveil-ai.github.io-blue)](https://thornveil-ai.github.io/signet/)
 [![License](https://img.shields.io/pypi/l/signet-sign.svg)](LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/signet-sign.svg)](https://pypi.org/project/signet-sign/)
 
@@ -17,8 +17,8 @@ of any OpenAI-compatible endpoint.
 
 [Why use this](#why-use-this) · [60-second quickstart](#quickstart) · [Public bug-hunt log](docs/bug-hunt-log.md) · [PyPI](https://pypi.org/project/signet-sign/)
 
-**Full documentation:** [jeranaias.github.io/signet](https://jeranaias.github.io/signet/)
-**Launch writeup:** [How an AI agent deleted a company's database in 9 seconds, and the pattern that stops it](https://jeranaias.substack.com/p/how-a-claude-powered-ai-agent-deleted)
+**Full documentation:** [thornveil-ai.github.io/signet](https://thornveil-ai.github.io/signet/)
+**Launch writeup:** [How an AI agent deleted a company's database in 9 seconds, and the pattern that stops it](https://thornveil-ai.substack.com/p/how-a-claude-powered-ai-agent-deleted)
 
 ---
 
@@ -311,7 +311,7 @@ or your preferred provider:
 - **Custom check development** against your specific threat model
 - **24/7 incident response and SLA**
 
-For Thornveil-specific engagements: jeranaias@gmail.com. For DIY,
+For Thornveil-specific engagements: jesse@thornveil.ai. For DIY,
 the [plugin interface](docs/plugin_dev.md) is the right starting
 point — signet's plugin protocol is designed so production-grade
 additions don't require forking the core.

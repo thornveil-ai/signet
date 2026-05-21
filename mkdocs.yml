@@ -1,8 +1,8 @@
 site_name: signet
 site_description: Capability-based safety gates for LLM agents.
-site_url: https://jeranaias.github.io/signet
-repo_url: https://github.com/jeranaias/signet
-repo_name: jeranaias/signet
+site_url: https://thornveil-ai.github.io/signet
+repo_url: https://github.com/thornveil-ai/signet
+repo_name: thornveil-ai/signet
 edit_uri: edit/main/docs/
 
 theme:
