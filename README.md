@@ -1,7 +1,9 @@
 # signet
 
+> **Public OSS. v0.1.4 production.** Apache-2.0 capability-based safety gate for LLM agents.
+
 [![PyPI](https://img.shields.io/pypi/v/signet-sign.svg)](https://pypi.org/project/signet-sign/)
-[![Docs](https://img.shields.io/badge/docs-thornveil-ai.github.io-blue)](https://thornveil-ai.github.io/signet/)
+[![Docs](https://img.shields.io/badge/docs-thornveil--ai.github.io-blue)](https://thornveil-ai.github.io/signet/)
 [![License](https://img.shields.io/pypi/l/signet-sign.svg)](LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/signet-sign.svg)](https://pypi.org/project/signet-sign/)
 
@@ -84,7 +86,7 @@ Three concrete scenarios signet stops at the gate:
 
 For each refusal, signet writes one immutable, HMAC-chained audit row and returns a signed `X-Signet-Receipt` header the caller can verify offline.
 
-## Architecture in one paragraph
+## Architecture
 
 A `Pipeline` runs an ordered list of `Check` objects against every request. Each check declares which of four stages it runs in:
 
@@ -96,6 +98,21 @@ A `Pipeline` runs an ordered list of `Check` objects against every request. Each
 | **RECORD** | After the response completes | Audit-only flagging; never modifies the delivered response |
 
 Stages are fail-closed. A block at stage *N* short-circuits stages *N+1...M*. Every decision becomes one immutable `AuditEntry` chained via HMAC-SHA256 — tampering with any entry breaks its own HMAC AND every subsequent entry's link.
+
+```mermaid
+graph LR
+    Client[Application] -->|OpenAI-compat request| Signet[signet pipeline]
+    Signet -->|ADMISSION checks| A{allow?}
+    A -->|block| Block403[403 to client]
+    A -->|allow| Model[LLM endpoint]
+    Model -->|stream chunks| INS{INSPECTION}
+    INS -->|abort| AbortStream[abort with trailer event]
+    INS -->|pass| Client
+    Model -->|tool call| COM{COMMITMENT}
+    COM -->|block| NoTool[tool blocked, model continues]
+    COM -->|allow| Tool[execute tool]
+    Signet -->|every decision| Audit[(HMAC-chained audit log)]
+```
 
 See [`docs/architecture.md`](docs/architecture.md) for the full design. See [`SECURITY.md`](SECURITY.md) for the threat model and what's explicitly out of scope.
 
@@ -122,7 +139,7 @@ Two reference plugins ship in `signet.plugins`:
 - **TribunalCheck** — dual-judge dissent. Caller supplies two LLM judge endpoints; disagreement escalates to human.
 - **SandboxPreviewCheck** — preview-before-commit. Caller supplies a sandbox runner; irreversible tool calls run in preview first, real commit only if the simulated effect passes audit.
 
-## Quickstart
+## Quick Start
 
 ```bash
 pip install signet-sign
@@ -360,3 +377,7 @@ Apache-2.0. See [`LICENSE`](LICENSE).
 ## Provenance
 
 Built by Jesse Morgan in tandem with Thornveil. Thornveil makes no IP claim on this open-source release; it is contributed under Apache-2.0 for community use. The proprietary Pyros engine and Mycelium proof-of-inference layer remain separate; signet is the publishable architectural pattern as a standalone OSS project anyone can build on.
+
+---
+
+A Thornveil system. See [other Thornveil systems](https://github.com/thornveil-ai).
