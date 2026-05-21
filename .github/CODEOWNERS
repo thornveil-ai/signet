@@ -1,5 +1,34 @@
-# Default reviewer for everything.
-# When third-party contributors send PRs, GitHub auto-requests review from
-# the listed owner. Until co-maintainers exist, this is the single owner.
+# Signet — capability-based safety gates for LLM agents
+# Apache-2.0, public.
+# Drop into thornveil-ai/signet/.github/CODEOWNERS at migration time.
 
-* @jeranaias
+# Default owner
+* @thornveil-ai/engineering
+
+# Core pipeline — security-sensitive, requires security-team review
+/src/signet/core/                @thornveil-ai/security
+/src/signet/audit/               @thornveil-ai/security
+
+# Built-in checks — security-sensitive
+/src/signet/checks/              @thornveil-ai/security
+
+# Adapters (OpenAI, Anthropic, LangChain) — engineering is fine
+/src/signet/adapters/            @thornveil-ai/engineering
+
+# Plugins — engineering, but Tribunal plugin specifically gates Pyros-pattern leakage
+/src/signet/plugins/             @thornveil-ai/engineering
+/src/signet/plugins/tribunal.py  @jeranaias
+
+# Server + realtime + sessions
+/src/signet/server/              @thornveil-ai/engineering
+
+# Build / release / publish — admin only (PyPI Trusted Publisher binding is here)
+/pyproject.toml                  @jeranaias
+/.github/workflows/publish.yml   @jeranaias
+
+# Docs
+/docs/                           @thornveil-ai/engineering
+/mkdocs.yml                      @thornveil-ai/engineering
+
+# Growth / marketing materials — admin only
+/growth/                         @jeranaias
