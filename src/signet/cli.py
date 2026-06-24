@@ -709,6 +709,120 @@ def keys_generate_ed25519(
     )
 
 
+@keys.command("generate-mldsa")
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Path to write the raw ML-DSA-65 private key (4032 bytes). "
+    "File mode is set to 0600 where supported.",
+)
+@click.option(
+    "--public-out",
+    "public_out_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Path for the matching public key (1952 bytes). Defaults to <--out>.pub if not specified.",
+)
+@click.option(
+    "--key-id",
+    default=None,
+    help="Optional key identifier. If provided, a sidecar <out>.meta.json records the binding.",
+)
+@click.option("--force", is_flag=True, help="Overwrite output files if they exist.")
+def keys_generate_mldsa(
+    out_path: Path,
+    public_out_path: Path | None,
+    key_id: str | None,
+    force: bool,
+) -> None:
+    """Generate a post-quantum ML-DSA-65 (FIPS 204) keypair.
+
+    The lattice-based counterpart to ``generate-ed25519`` for receipts
+    that must resist a future quantum adversary. Keys are RAW bytes (no
+    standard PEM OID for ML-DSA yet): private 4032 bytes, public 1952
+    bytes. Share the public key with verifiers; they cannot forge.
+
+    EXPERIMENTAL. Requires ``pip install signet-sign[pq]``.
+    """
+    _reject_windows_reserved_device_name(out_path, kind="--out")
+    if public_out_path is not None:
+        _reject_windows_reserved_device_name(public_out_path, kind="--public-out")
+    if key_id is not None:
+        _validate_key_id_charset(key_id, source="--key-id")
+
+    try:
+        from signet.server.receipt import _load_mldsa_backend
+
+        backend = _load_mldsa_backend()
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if public_out_path is None:
+        public_out_path = out_path.with_suffix(out_path.suffix + ".pub")
+    for p in (out_path, public_out_path):
+        if p.exists() and not force:
+            raise click.ClickException(
+                f"refusing to overwrite existing file {p}; pass --force to override"
+            )
+
+    public_key, private_key = backend.keygen()
+    out_path.write_bytes(private_key)
+    public_out_path.write_bytes(public_key)
+
+    import contextlib
+    import os
+
+    if hasattr(os, "chmod"):
+        with contextlib.suppress(OSError):
+            os.chmod(out_path, 0o600)
+
+    click.secho(f"  wrote private key:  {out_path} (chmod 0600 attempted)", fg="green")
+    click.secho(f"  wrote public key:   {public_out_path}", fg="green")
+    if key_id:
+        from datetime import UTC, datetime
+
+        meta_path = out_path.with_suffix(out_path.suffix + ".meta.json")
+        meta_path.write_text(
+            json.dumps(
+                {
+                    "key_id": key_id,
+                    "alg": "ml-dsa-65",
+                    "generated_at": datetime.now(tz=UTC).isoformat(timespec="seconds"),
+                    "signet_version": __version__,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        click.secho(f"  wrote key metadata: {meta_path}", fg="green")
+        click.echo(f"\nkey_id (record this; verifiers need it): {_sanitize_for_terminal(key_id)}")
+    out_repr = repr(str(out_path))
+    public_repr = repr(str(public_out_path))
+    key_id_value = _sanitize_for_terminal(key_id) if key_id else "REPLACE_ME"
+    click.echo(
+        "\n  In your pipeline / app code (a signer loads BOTH key files --\n"
+        "  ML-DSA cannot re-derive the public key from the private one):\n"
+        "    from signet.server.receipt import MLDSAReceiptSigner\n"
+        "    signer = MLDSAReceiptSigner.from_files(\n"
+        f"        private_key_path={out_repr},\n"
+        f"        public_key_path={public_repr},\n"
+        f'        key_id="{key_id_value}",\n'
+        "    )\n"
+        "    SignetApp(config=cfg, pipeline=pipeline, receipt_signer=signer)"
+    )
+    click.echo(
+        "\n  Verifiers construct a verify-only signer from the public key:\n"
+        "    MLDSAReceiptSigner.from_files(\n"
+        f"        public_key_path={public_repr},\n"
+        f'        key_id="{key_id_value}",\n'
+        "    )"
+    )
+
+
 @main.command()
 @click.option(
     "--upstream",
@@ -1373,6 +1487,153 @@ def _verify_break_hint(kind: str) -> str:
             "or truncated). Restore from a known-good copy."
         )
     return ""
+
+
+@audit.command("verify-contiguity")
+@click.argument("log_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--hmac-secret",
+    envvar="SIGNET_HMAC_SECRET",
+    required=True,
+    help="HMAC secret as hex. Contiguity is only trustworthy on an "
+    "HMAC-intact chain, so this command verifies integrity first.",
+)
+@click.option(
+    "--key-id",
+    "key_id",
+    default="k1",
+    show_default=True,
+    envvar="SIGNET_HMAC_KEY_ID",
+    help="ID of the active key. Match the writer's --hmac-key-id.",
+)
+@click.option(
+    "--expect-start",
+    type=int,
+    default=None,
+    help="Assert the chain's first sequence number equals this value. "
+    "Lets you catch head truncation when you know the true start "
+    "out-of-band (e.g. from an externally anchored receipt).",
+)
+@click.option(
+    "--expect-end",
+    type=int,
+    default=None,
+    help="Assert the chain's last sequence number equals this value. "
+    "Catches tail truncation -- the one tamper an intact HMAC chain "
+    "cannot show on its own.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def audit_verify_contiguity(
+    log_path: Path,
+    hmac_secret: str,
+    key_id: str,
+    expect_start: int | None,
+    expect_end: int | None,
+    as_json: bool,
+) -> None:
+    """Check LOG_PATH for sequence-number gaps (missing entries).
+
+    The HMAC chain proves nothing you HOLD was altered; this proves
+    nothing was DROPPED. It first runs the integrity verify (a forged
+    sequence number is just an unverified integer) and then reports any
+    gap, duplicate, out-of-order, or unnumbered entry.
+    """
+    _validate_key_id_charset(key_id, source="--key-id/SIGNET_HMAC_KEY_ID")
+    from signet.audit.backend import MalformedAuditEntry
+    from signet.audit.keyring import Key, KeyRing
+    from signet.audit.verifier import ChainVerifier, verify_contiguity
+
+    keyring = KeyRing(
+        active=Key(
+            key_id=key_id,
+            secret=_parse_hex_secret(hmac_secret, "--hmac-secret/SIGNET_HMAC_SECRET"),
+        )
+    )
+
+    try:
+        integrity = ChainVerifier(_open_jsonl_backend(log_path), keyring).verify()
+        contiguity = verify_contiguity(
+            _open_jsonl_backend(log_path),
+            expected_start=expect_start,
+            expected_end=expect_end,
+        )
+    except MalformedAuditEntry as exc:
+        raise _malformed_audit_to_click_exception(exc) from exc
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "integrity_ok": integrity.ok,
+                    "contiguity_ok": contiguity.ok,
+                    "sequenced": contiguity.sequenced,
+                    "total_entries": contiguity.total_entries,
+                    "numbered_entries": contiguity.numbered_entries,
+                    "first_seq": contiguity.first_seq,
+                    "last_seq": contiguity.last_seq,
+                    "gaps": [
+                        {"after_index": g.after_index, "from": g.missing_from, "to": g.missing_to}
+                        for g in contiguity.gaps
+                    ],
+                    "duplicates": list(contiguity.duplicates),
+                    "out_of_order_indices": list(contiguity.out_of_order_indices),
+                    "unnumbered_indices": list(contiguity.unnumbered_indices),
+                    "boundary_breaks": list(contiguity.boundary_breaks),
+                    "signet_version": contiguity.signet_version,
+                    "verified_at": contiguity.verified_at,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        sys.exit(0 if (integrity.ok and contiguity.ok) else 2)
+
+    if not integrity.ok:
+        click.secho(
+            f"INTEGRITY BROKEN: {len(integrity.breaks)} issue(s) -- "
+            "sequence numbers cannot be trusted until the chain verifies. "
+            "Run 'signet audit verify' for detail.",
+            fg="red",
+            bold=True,
+        )
+        sys.exit(2)
+
+    if not contiguity.sequenced:
+        click.secho(
+            f"N/A: {contiguity.total_entries} entries carry no sequence numbers "
+            "(chain was written without sequence=True); completeness cannot be checked.",
+            fg="yellow",
+        )
+        sys.exit(2)
+
+    if contiguity.ok:
+        click.secho(
+            f"OK: {contiguity.numbered_entries} entries, "
+            f"sequence {contiguity.first_seq}..{contiguity.last_seq} complete and gap-free",
+            fg="green",
+        )
+        return
+
+    click.secho("INCOMPLETE: the chain is intact but entries are missing", fg="red", bold=True)
+    for g in contiguity.gaps:
+        click.echo(
+            f"  gap after entry {g.after_index}: "
+            f"missing sequence {g.missing_from}..{g.missing_to} ({g.count} entr"
+            f"{'y' if g.count == 1 else 'ies'})"
+        )
+    for dup in contiguity.duplicates:
+        click.echo(f"  duplicate sequence number: {dup}")
+    for idx in contiguity.out_of_order_indices:
+        click.echo(f"  out-of-order sequence at entry {idx}")
+    if contiguity.unnumbered_indices:
+        click.echo(
+            f"  {len(contiguity.unnumbered_indices)} entr"
+            f"{'y' if len(contiguity.unnumbered_indices) == 1 else 'ies'} "
+            "missing a sequence number (possible dropped marker)"
+        )
+    for b in contiguity.boundary_breaks:
+        click.echo(f"  boundary: {b}")
+    sys.exit(2)
 
 
 @audit.command("count")

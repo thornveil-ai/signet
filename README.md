@@ -296,6 +296,35 @@ by default; works against any TSA you have a contract with). The
 anchor receipt is bound to the entry by the chain HMAC, so swapping
 either fails verification. No extra dependencies.
 
+### What's tamper-evident vs. *complete*
+
+The HMAC chain proves nothing you **hold** was altered, inserted, or
+reordered — but a chain truncated at the tail (or with an entry that
+was never written) still links cleanly. Build the chain with
+`HmacChain(..., sequence=True)` to stamp an HMAC-bound monotonic
+sequence number into every entry, then run `signet audit
+verify-contiguity` to prove there are no gaps. Pass `--expect-start` /
+`--expect-end` when you know the true endpoints out-of-band (e.g. from
+an externally anchored receipt) to catch truncation the links alone
+cannot show.
+
+### Verifiable by someone who hasn't installed signet
+
+`tools/verify_standalone.py` is a single file with **no `import
+signet`** — stdlib only (plus `rfc8785` / `cryptography` /
+`dilithium-py` only when the log actually uses JCS or asymmetric
+receipts). It re-derives the canonical serialization and verifies the
+HMAC chain, its sequence completeness, and Ed25519 / ML-DSA receipts
+from the log/receipt bytes and a key alone. Hand it to a regulator who
+trusts neither signet nor you; a parity test keeps its canonicalization
+byte-identical to the in-tree signer.
+
+For deployments that want a canonicalization an external verifier can
+reproduce with zero ambiguity, `HmacChain(..., canon="jcs")` signs
+under RFC 8785 (JSON Canonicalization Scheme). It is opt-in and
+self-describing (a signed `_canon` marker), so existing chains are
+unaffected. Optional dep `pip install signet-sign[jcs]`.
+
 ### What's symmetric vs. asymmetric (receipts)
 
 The default `HmacReceiptSigner` is symmetric — fine when the
@@ -306,6 +335,14 @@ swap in `Ed25519ReceiptSigner`. The proxy holds the private key;
 verifiers hold only the public key and cannot forge. Generate keys
 with `signet keys generate-ed25519`. Optional dep
 `pip install signet-sign[ed25519]`.
+
+For receipts that must stay unforgeable against a future quantum
+adversary (harvest-now, decrypt-later), `MLDSAReceiptSigner` signs with
+post-quantum ML-DSA-65 (FIPS 204) instead. Generate keys with `signet
+keys generate-mldsa`. Optional dep `pip install signet-sign[pq]`.
+EXPERIMENTAL: the backend is the pure-Python `dilithium-py` reference
+implementation, and ML-DSA-65 signatures are ~3.3 KB (so the receipt
+header is ~6.6 KB — confirm your ingress tolerates it).
 
 ### When you need more than the OSS
 
@@ -356,6 +393,12 @@ Recent cycles:
 ```bash
 # Verify the audit chain end-to-end
 signet audit verify ./audit.jsonl --hmac-secret <hex>
+
+# Prove the chain is also complete (no dropped/truncated entries)
+signet audit verify-contiguity ./audit.jsonl --hmac-secret <hex> --expect-end <N>
+
+# Verify with no signet install (hand this to an external auditor)
+python tools/verify_standalone.py chain ./audit.jsonl --secret <hex> --key-id k1
 
 # Pretty-print one entry
 signet audit show <entry-id> --audit-log ./audit.jsonl

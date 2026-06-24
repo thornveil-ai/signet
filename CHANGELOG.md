@@ -8,6 +8,56 @@ pre-1.0 minor versions may break the API.
 
 ## [Unreleased]
 
+## [0.1.11] -- 2026-06-24
+
+### Completeness, canonicalization, post-quantum, and a zero-install verifier
+
+Four additive, opt-in hardening features. All default to OFF, so existing
+chains stay byte-for-byte verifiable with no migration.
+
+### Added
+
+- **Monotonic sequence numbers + `signet audit verify-contiguity`.** Build
+  an `HmacChain(..., sequence=True)` to stamp a per-chain monotonic
+  `_seq` (HMAC-bound) into each entry. The new verifier reports gaps,
+  duplicates, out-of-order numbering, and unnumbered entries, and accepts
+  `--expect-start` / `--expect-end` to assert an operator-declared
+  boundary. This closes the one gap the prev_hmac links cannot show on
+  their own: a **truncated tail** (or never-written entry at a boundary)
+  still links cleanly, but a hole in the sequence proves an entry is
+  missing. New API: `verify_contiguity()`, `ContiguityReport`,
+  `ContiguityGap`.
+- **RFC 8785 (JCS) canonicalization, versioned and opt-in.**
+  `HmacChain(..., canon="jcs")` signs entries under the JSON
+  Canonicalization Scheme. The scheme is recorded in a signed `_canon`
+  marker, so writer and verifier always agree and each entry self-
+  describes its canon. Out-of-range integers (e.g. `ts_ns`) are
+  I-JSON-encoded per RFC 7493 before canonicalization. Requires
+  `signet-sign[jcs]` (the `rfc8785` package); legacy chains never load it.
+- **Post-quantum ML-DSA-65 (FIPS 204) receipt signer.** `MLDSAReceiptSigner`
+  joins `Ed25519ReceiptSigner` for receipts that must resist a
+  harvest-now-decrypt-later adversary. New CLI: `signet keys
+  generate-mldsa`. Requires `signet-sign[pq]`. Marked EXPERIMENTAL (the
+  backend is the pure-Python `dilithium-py` reference implementation; not
+  constant-time). Note: ML-DSA-65 signatures are ~3.3 KB, so the receipt
+  header is ~6.6 KB.
+- **Standalone zero-install verifier** (`tools/verify_standalone.py`).
+  A single file with no `import signet` that re-derives the canonical
+  serialization and verifies an HMAC chain, its sequence completeness,
+  and Ed25519 / ML-DSA receipts from the log/receipt bytes plus a key
+  alone. Hand it to an auditor who has neither installed signet nor
+  trusts you. A parity test asserts its canonicalization stays
+  byte-identical to the in-tree serializer.
+
+### Changed
+
+- `ChainVerifier` now reports a non-canonicalizable entry (NaN/Inf in
+  metadata, an unknown/tampered `_canon` marker, or a missing JCS
+  backend) as a structured `MALFORMED_LINE` break instead of letting the
+  exception escape the walk.
+- New optional extras: `jcs` (`rfc8785`) and `pq` (`dilithium-py`); both
+  folded into `all` and the dev environment.
+
 ## [0.1.10.1] -- 2026-05-16
 
 ### Hotfix: 324 KB spiral test asserts deadline-fired signal, not wall-clock

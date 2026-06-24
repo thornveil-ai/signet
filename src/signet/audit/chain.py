@@ -51,6 +51,42 @@ logger = logging.getLogger("signet.audit.chain")
 #: Verification reads this to look up the right key in the :class:`KeyRing`.
 KEY_ID_FIELD = "_signing_key_id"
 
+#: Field name (in entry metadata) recording which canonicalization scheme
+#: produced this entry's signed payload. ABSENT means legacy compact-JSON
+#: -- the only scheme that existed through v0.1.10 -- so every chain
+#: written before this field shipped stays byte-for-byte verifiable with
+#: no migration. The marker lives INSIDE the signed payload, so flipping
+#: it is itself a tamper that surfaces as ``SELF_MISMATCH``.
+CANON_FIELD = "_canon"
+
+#: Legacy compact-JSON canonicalization (``json.dumps`` with sorted keys,
+#: no whitespace). Implicit whenever :data:`CANON_FIELD` is absent.
+CANON_LEGACY = "legacy"
+
+#: RFC 8785 JSON Canonicalization Scheme. Opt-in via ``HmacChain(canon=
+#: "jcs")``; requires the ``rfc8785`` package (``signet-sign[jcs]``).
+CANON_JCS_V1 = "jcs/v1"
+
+#: Caller-facing aliases accepted by ``HmacChain(canon=...)``.
+_CANON_ALIASES = {
+    "legacy": CANON_LEGACY,
+    CANON_LEGACY: CANON_LEGACY,
+    "jcs": CANON_JCS_V1,
+    CANON_JCS_V1: CANON_JCS_V1,
+}
+
+#: Field name (in entry metadata) carrying the per-chain monotonic
+#: sequence number. Present only when the chain was constructed with
+#: ``sequence=True``. The ``prev_hmac`` links already detect insertion,
+#: deletion, and reordering WITHIN the entries you hold -- but a chain
+#: truncated at the tail (or never-written entries at a boundary) still
+#: links cleanly. A gap in the monotonic sequence proves an entry is
+#: missing from an otherwise-intact run, which is exactly the
+#: completeness claim ``signet audit verify-contiguity`` checks. The
+#: number is stamped into metadata BEFORE the HMAC is computed, so it is
+#: bound to the entry and cannot be altered without breaking the chain.
+SEQ_FIELD = "_seq"
+
 
 class HmacChain:
     """Append-and-sign coordinator over a backend and key ring.
@@ -80,11 +116,29 @@ class HmacChain:
         anchor: AnchorBackend | None = None,
         require_anchor_success: bool = False,
         cache_prev: bool = True,
+        sequence: bool = False,
+        canon: str = CANON_LEGACY,
     ) -> None:
         self._backend = backend
         self._keyring = keyring
         self._anchor: AnchorBackend = anchor if anchor is not None else NoopAnchor()
         self._require_anchor_success = require_anchor_success
+        # Opt-in monotonic sequence numbering (see SEQ_FIELD). Default
+        # off so existing chains stay byte-identical -- enabling it adds
+        # a metadata field that changes every signed payload, which is
+        # fine for a fresh chain but would fork an existing one.
+        self._sequence = sequence
+        # Canonicalization scheme for the signed payload. Default legacy
+        # keeps v0.1.10 byte-compatibility; "jcs" opts into RFC 8785.
+        try:
+            self._canon = _CANON_ALIASES[canon]
+        except KeyError:
+            raise ValueError(
+                f"unknown canon {canon!r}; expected one of {sorted(set(_CANON_ALIASES))}"
+            ) from None
+        # Last sequence number written, cached alongside _cached_prev so
+        # sequential single-process appends don't rescan the backend.
+        self._cached_seq: int | None = None
         # When True (default, single-process), cache the last entry's
         # HMAC so we don't scan the backend on every append. Set False
         # when running multiple writers against a FileLockingJsonlBackend
@@ -141,6 +195,7 @@ class HmacChain:
                     ),
                 )
                 self._cached_prev = linked.hmac
+                self._cached_seq = _entry_seq(linked)
                 return linked
 
             # Legacy single-process / non-FileLockingJsonlBackend path.
@@ -148,6 +203,7 @@ class HmacChain:
             linked = self._build_linked_entry(entry, prev_hmac)
             self._backend.append(linked)
             self._cached_prev = linked.hmac
+            self._cached_seq = _entry_seq(linked)
             return linked
 
     def _build_linked_entry(self, entry: AuditEntry, prev_hmac: str) -> AuditEntry:
@@ -163,6 +219,17 @@ class HmacChain:
         """
         active = self._keyring.active
 
+        # Fields stamped into metadata BEFORE signing so the chain HMAC
+        # binds them: the signing-key ID always, plus (when enabled) the
+        # canonicalization marker and the monotonic sequence number.
+        # Both the tentative and final payloads carry the identical set
+        # so the entry's identity is stable across the anchor round-trip.
+        stamped: dict[str, Any] = {KEY_ID_FIELD: active.key_id}
+        if self._canon != CANON_LEGACY:
+            stamped[CANON_FIELD] = self._canon
+        if self._sequence:
+            stamped[SEQ_FIELD] = self._read_prev_seq() + 1
+
         # First pass: compute a tentative HMAC over the payload
         # WITHOUT the anchor receipt. The tentative HMAC is what we
         # submit to the anchor backend -- anchoring the input to the
@@ -171,7 +238,7 @@ class HmacChain:
         # the chain HMAC commits to the anchor receipt + payload).
         tentative_with_key = replace(
             entry,
-            metadata={**entry.metadata, KEY_ID_FIELD: active.key_id},
+            metadata={**entry.metadata, **stamped},
             prev_hmac=prev_hmac,
         )
         tentative_payload = _serialize_for_signing(tentative_with_key)
@@ -231,7 +298,7 @@ class HmacChain:
         # metadata, then compute the chain HMAC over the full payload.
         anchored_metadata = {
             **entry.metadata,
-            KEY_ID_FIELD: active.key_id,
+            **stamped,
             ANCHOR_FIELD: anchor_receipt.to_dict(),
         }
         entry_with_anchor = replace(
@@ -285,6 +352,41 @@ class HmacChain:
             self._cached_prev = prev
         return prev
 
+    def _read_prev_seq(self) -> int:
+        """Return the sequence number the next append must follow, or
+        ``-1`` when the chain has no sequenced tail (so the first
+        sequenced entry is numbered ``0``).
+
+        Mirrors :meth:`_read_prev_hmac`: cached for sequential
+        single-process appends, re-read from the backend tail when
+        ``cache_prev=False``. A tail entry written before ``sequence=
+        True`` was enabled carries no :data:`SEQ_FIELD`; we treat that
+        as ``-1`` so numbering starts fresh -- enabling sequencing
+        mid-chain therefore produces a visible boundary that
+        ``verify-contiguity`` reports rather than silently colliding.
+        """
+        if self._cache_prev and self._cached_seq is not None:
+            return self._cached_seq
+        last = self._backend.last_entry()
+        seq = -1 if last is None else _entry_seq(last)
+        prev = seq if seq is not None else -1
+        if self._cache_prev:
+            self._cached_seq = prev
+        return prev
+
+
+def _entry_seq(entry: AuditEntry) -> int | None:
+    """Extract the monotonic sequence number from an entry, or ``None``
+    when the entry carries no (valid integer) :data:`SEQ_FIELD`.
+
+    ``bool`` is rejected explicitly: it is an ``int`` subclass in Python,
+    and a tampered ``"_seq": true`` would otherwise read back as ``1``.
+    """
+    raw = entry.metadata.get(SEQ_FIELD)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw
+
 
 def _tail_is_marker(entry: AuditEntry) -> bool:
     """Round 11 HIGH-1: marker-aware tail detection for chain extension.
@@ -329,16 +431,78 @@ def _serialize_for_signing(entry: AuditEntry) -> bytes:
       will produce different signatures for visually-identical text;
       normalize at the application layer if that matters.
 
-    For richer canonicalization (RFC 8785 JCS, CBOR-deterministic),
-    swap this function out -- :class:`HmacChain` and
-    :class:`ChainVerifier` import it as a module-level callable.
+    Canon selection is per-entry and self-describing: the entry's
+    metadata :data:`CANON_FIELD` names the scheme. Absent -> ``legacy``
+    (the byte-identical v0.1.10 behavior below). ``jcs/v1`` -> RFC 8785
+    via :func:`_jcs_dumps`. Because the marker lives inside the signed
+    payload, the writer and the verifier always agree on the scheme for
+    a given entry, and tampering with the marker breaks the entry's own
+    HMAC.
     """
     d: dict[str, Any] = entry.to_dict()
     d.pop("hmac", None)
-    return json.dumps(
-        d,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-        ensure_ascii=False,
-    ).encode("utf-8")
+    meta = d.get("metadata")
+    canon = meta.get(CANON_FIELD, CANON_LEGACY) if isinstance(meta, dict) else CANON_LEGACY
+    if canon == CANON_LEGACY:
+        return json.dumps(
+            d,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+            ensure_ascii=False,
+        ).encode("utf-8")
+    if canon == CANON_JCS_V1:
+        return _jcs_dumps(d)
+    raise ValueError(f"unknown canonicalization scheme {canon!r} in {CANON_FIELD}")
+
+
+#: Largest integer exactly representable as an IEEE-754 double, i.e. the
+#: ECMAScript ``Number.MAX_SAFE_INTEGER``. RFC 8785 canonicalizes every
+#: JSON number through the double domain, so integers beyond this bound
+#: (``ts_ns`` -- nanoseconds since epoch -- is ALWAYS beyond it) have no
+#: canonical JSON-number form.
+_JS_MAX_SAFE_INT = 2**53 - 1
+
+
+def _ijson_safe(obj: Any) -> Any:
+    """Recursively encode out-of-range integers as decimal strings.
+
+    RFC 8785 numbers live in the IEEE-754 double domain; an integer
+    larger than :data:`_JS_MAX_SAFE_INT` cannot be canonicalized as a
+    JSON number. RFC 7493 (I-JSON) prescribes carrying such integers as
+    strings, so we apply that transform deterministically before handing
+    the payload to RFC 8785. The threshold is fixed, so signer and
+    verifier (and the standalone verifier) produce identical bytes.
+
+    Only out-of-range integers are touched -- small ints stay JSON
+    numbers, exactly as JCS expects. ``bool`` is left alone (it is an
+    ``int`` subclass but serializes as ``true``/``false``).
+    """
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, int):
+        return str(obj) if abs(obj) > _JS_MAX_SAFE_INT else obj
+    if isinstance(obj, dict):
+        return {k: _ijson_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_ijson_safe(v) for v in obj]
+    return obj
+
+
+def _jcs_dumps(d: dict[str, Any]) -> bytes:
+    """Serialize ``d`` per RFC 8785 (JSON Canonicalization Scheme).
+
+    Lazy-imports ``rfc8785`` so the dependency is only required by
+    deployments that actually opt into JCS chains (``signet-sign[jcs]``).
+    Legacy chains never reach this path and keep zero crypto/runtime
+    deps. Out-of-range integers are I-JSON-encoded first (see
+    :func:`_ijson_safe`).
+    """
+    try:
+        import rfc8785
+    except ModuleNotFoundError as exc:  # pragma: no cover - exercised via skip
+        raise RuntimeError(
+            "JCS canonicalization (canon='jcs') requires the 'rfc8785' package; "
+            "install it with: pip install signet-sign[jcs]"
+        ) from exc
+    return rfc8785.dumps(_ijson_safe(d))

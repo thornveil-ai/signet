@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from signet.audit.chain import _serialize_for_signing
 from signet.audit.keyring import KeyRing
@@ -64,6 +64,9 @@ ALG_HMAC_SHA256 = "hmac-sha256"
 
 #: Algorithm tag for the asymmetric Ed25519 signer.
 ALG_ED25519 = "ed25519"
+
+#: Algorithm tag for the post-quantum ML-DSA-65 (FIPS 204) signer.
+ALG_ML_DSA_65 = "ml-dsa-65"
 
 #: Header value template. Order is fixed so receipts are byte-stable
 #: across runs given the same inputs. Parsers must be tolerant to extra
@@ -330,6 +333,202 @@ class Ed25519ReceiptSigner:
         except InvalidSignature:
             return False
         return True
+
+
+def _load_mldsa_backend() -> Any:
+    """Return the ML-DSA-65 implementation, or raise a helpful error.
+
+    Resolved lazily so the post-quantum dependency is only required by
+    deployments that actually emit PQ receipts (``signet-sign[pq]``).
+    Today the backend is the pure-Python ``dilithium-py`` reference
+    implementation of FIPS 204; when a hardware-backed or OpenSSL 3.5
+    ML-DSA lands in ``cryptography`` this loader is the single place to
+    add it.
+    """
+    try:
+        from dilithium_py.ml_dsa import ML_DSA_65
+    except ModuleNotFoundError as exc:  # pragma: no cover - exercised via skip
+        raise RuntimeError(
+            "ML-DSA-65 receipts require a post-quantum backend; "
+            "install it with: pip install signet-sign[pq]"
+        ) from exc
+    return ML_DSA_65
+
+
+class MLDSAReceiptSigner:
+    """Post-quantum ML-DSA-65 (FIPS 204) receipt signer.
+
+    The lattice-based sibling of :class:`Ed25519ReceiptSigner`: the proxy
+    holds the private key and signs; verifiers hold only the public key
+    and cannot forge. Use it when receipts must stay verifiable against a
+    "harvest-now, decrypt-later" adversary -- the security of an Ed25519
+    receipt rests on assumptions a future quantum computer breaks, while
+    ML-DSA's rest on module-lattice problems believed quantum-resistant.
+
+    Trade-offs to know before reaching for this:
+
+    * **Header size.** An ML-DSA-65 signature is ~3.3 KB (vs 64 bytes for
+      Ed25519), so the hex-encoded ``X-Signet-Receipt`` header is ~6.6 KB.
+      Confirm your ingress and any header-size limits tolerate it.
+    * **Keys are raw bytes**, not PEM -- there is no universally-deployed
+      PEM OID for ML-DSA yet. Public key: 1952 bytes; private key: 4032
+      bytes. Share the public key out-of-band as you would a PEM.
+    * **Backend.** Requires ``signet-sign[pq]`` (the pure-Python
+      ``dilithium-py`` reference implementation of FIPS 204). It is
+      functionally correct and fully verifiable but not constant-time;
+      treat it as the interoperable default until a hardened/FIPS-
+      validated ML-DSA backend is wired through :func:`_load_mldsa_backend`.
+      This signer is marked EXPERIMENTAL for that reason.
+
+    Example::
+
+        signer = MLDSAReceiptSigner.generate(key_id="signet-pq-2026q2")
+        # Persist signer.private_bytes() (0600) and publish
+        # signer.public_bytes() to verifiers.
+    """
+
+    alg = ALG_ML_DSA_65
+
+    def __init__(
+        self,
+        *,
+        private_key: bytes | None,
+        public_key: bytes,
+        key_id: str,
+    ) -> None:
+        if not key_id:
+            raise ValueError("key_id must be a non-empty string")
+        if not isinstance(public_key, (bytes, bytearray)) or not public_key:
+            raise ValueError("public_key must be non-empty raw bytes")
+        if private_key is not None and (
+            not isinstance(private_key, (bytes, bytearray)) or not private_key
+        ):
+            raise ValueError("private_key, when provided, must be non-empty raw bytes")
+        self._private = bytes(private_key) if private_key is not None else None
+        self._public = bytes(public_key)
+        self._key_id = key_id
+
+    @property
+    def key_id(self) -> str:
+        return self._key_id
+
+    @classmethod
+    def generate(cls, key_id: str) -> MLDSAReceiptSigner:
+        """Generate a fresh ML-DSA-65 keypair.
+
+        Production deployments should generate the key once, store the
+        private half in a secrets manager (0600), and construct via
+        :meth:`from_raw` / :meth:`from_files`.
+        """
+        backend = _load_mldsa_backend()
+        public_key, private_key = backend.keygen()
+        return cls(private_key=private_key, public_key=public_key, key_id=key_id)
+
+    @classmethod
+    def from_raw(
+        cls,
+        *,
+        private_key: bytes | None = None,
+        public_key: bytes | None = None,
+        key_id: str,
+    ) -> MLDSAReceiptSigner:
+        """Construct from raw key bytes.
+
+        Pass ``private_key`` to build a signer (proxy); pass only
+        ``public_key`` to build a verifier (auditor). When only the
+        private key is supplied the public key is NOT derivable from it
+        cheaply, so at least one of the two must be present and a
+        verifier needs the public key explicitly.
+        """
+        if public_key is None:
+            raise ValueError(
+                "public_key is required (it cannot be re-derived from an "
+                "ML-DSA private key without the original keygen seed)"
+            )
+        return cls(private_key=private_key, public_key=public_key, key_id=key_id)
+
+    @classmethod
+    def from_files(
+        cls,
+        *,
+        private_key_path: str | None = None,
+        public_key_path: str | None = None,
+        key_id: str,
+    ) -> MLDSAReceiptSigner:
+        """Load a signer/verifier from raw key file(s)."""
+        priv: bytes | None = None
+        pub: bytes | None = None
+        if private_key_path is not None:
+            with open(private_key_path, "rb") as f:
+                priv = f.read()
+        if public_key_path is not None:
+            with open(public_key_path, "rb") as f:
+                pub = f.read()
+        return cls.from_raw(private_key=priv, public_key=pub, key_id=key_id)
+
+    def public_bytes(self) -> bytes:
+        """Return the raw public key for sharing with verifiers."""
+        return self._public
+
+    def private_bytes(self) -> bytes:
+        """Return the raw private key for secrets-manager storage.
+
+        Raises ``RuntimeError`` on a verify-only instance.
+        """
+        if self._private is None:
+            raise RuntimeError("this MLDSAReceiptSigner is verify-only -- no private key")
+        return self._private
+
+    def sign(self, entry: AuditEntry) -> str:
+        """Return a header value for ``entry``.
+
+        Raises ``RuntimeError`` if constructed without a private key.
+        """
+        if self._private is None:
+            raise RuntimeError(
+                "this MLDSAReceiptSigner is verify-only -- no private key was loaded; cannot sign"
+            )
+        backend = _load_mldsa_backend()
+        payload = _serialize_for_signing(entry)
+        sig = backend.sign(self._private, payload).hex()
+        return _HEADER_FORMAT.format(
+            ver=RECEIPT_VERSION,
+            alg=self.alg,
+            entry=entry.entry_id,
+            key=self._key_id,
+            sig=sig,
+        )
+
+    def verify(self, header_value: str, entry: AuditEntry) -> bool:
+        """Return ``True`` iff the receipt matches ``entry`` under this
+        signer's algorithm, key_id, and public key.
+
+        Rejects (returns ``False``) when the header is malformed, the
+        version/alg/entry-id/key-id mismatch, the signature is not valid
+        hex, or the lattice verification fails.
+        """
+        parsed = parse_header(header_value)
+        if parsed is None:
+            return False
+        if parsed.get("alg") != self.alg:
+            return False
+        if parsed["entry"] != entry.entry_id:
+            return False
+        if parsed["key"] != self._key_id:
+            return False
+        try:
+            sig = bytes.fromhex(parsed["sig"])
+        except ValueError:
+            return False
+        backend = _load_mldsa_backend()
+        payload = _serialize_for_signing(entry)
+        try:
+            return bool(backend.verify(self._public, payload, sig))
+        except Exception:
+            # A reference backend may raise on malformed signatures
+            # rather than returning False; treat any failure as "does
+            # not verify" so a bad receipt never reads as valid.
+            return False
 
 
 def parse_header(value: str) -> dict[str, str] | None:
