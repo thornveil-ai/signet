@@ -326,7 +326,23 @@ class ChainVerifier:
                     continue
 
                 # Self check: recompute the HMAC and compare
-                expected_payload = _serialize_for_signing(entry)
+                try:
+                    expected_payload = _serialize_for_signing(entry)
+                except (ValueError, RuntimeError) as exc:
+                    # A non-canonicalizable payload (NaN/Inf in metadata,
+                    # an unknown/tampered _canon marker, or a missing JCS
+                    # backend) must not crash the walk. Surface it as a
+                    # structured MALFORMED_LINE break and move on.
+                    breaks.append(
+                        ChainBreak(
+                            index=index,
+                            entry_id=entry.entry_id,
+                            kind=BreakKind.MALFORMED_LINE,
+                            detail=f"entry payload is not canonicalizable: {exc}",
+                        )
+                    )
+                    prev_hmac = entry.hmac
+                    continue
                 expected_hmac = hmac.new(key.secret, expected_payload, hashlib.sha256).hexdigest()
                 if not hmac.compare_digest(expected_hmac, entry.hmac):
                     if not link_break_at_this_index:
@@ -436,7 +452,18 @@ def _verify_entry_self(
         )
         return False
 
-    expected_payload = _serialize_for_signing(entry)
+    try:
+        expected_payload = _serialize_for_signing(entry)
+    except (ValueError, RuntimeError) as exc:
+        breaks.append(
+            ChainBreak(
+                index=index,
+                entry_id=entry.entry_id,
+                kind=BreakKind.MALFORMED_LINE,
+                detail=f"entry payload is not canonicalizable: {exc}",
+            )
+        )
+        return False
     expected_hmac = hmac.new(key.secret, expected_payload, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected_hmac, entry.hmac):
         if not suppress_self_mismatch:
@@ -861,10 +888,206 @@ def verify_with_archives(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class ContiguityGap:
+    """A run of missing sequence numbers between two present entries."""
+
+    after_index: int
+    """Chain index of the entry immediately BEFORE the gap."""
+
+    missing_from: int
+    """First missing sequence number (inclusive)."""
+
+    missing_to: int
+    """Last missing sequence number (inclusive)."""
+
+    @property
+    def count(self) -> int:
+        """How many sequence numbers are missing in this gap."""
+        return self.missing_to - self.missing_from + 1
+
+
+@dataclass(frozen=True, slots=True)
+class ContiguityReport:
+    """Completeness report from :func:`verify_contiguity`.
+
+    The HMAC chain proves no entry you HOLD was altered, inserted, or
+    reordered. It cannot prove an entry was never written, or that the
+    tail was truncated -- a shorter intact chain still verifies. The
+    per-chain monotonic sequence number (:data:`signet.audit.chain.
+    SEQ_FIELD`, written when the chain is constructed with
+    ``sequence=True``) closes that gap: a hole in the numbering is an
+    entry that is provably missing from an otherwise-intact run.
+
+    Trust note: the sequence numbers are only as trustworthy as the
+    chain itself. A sequence value lives inside the signed payload, so
+    forging one breaks the entry's HMAC -- but that protection only
+    holds if you ALSO run :class:`ChainVerifier`. Always pair a
+    contiguity check with an HMAC verify (the ``signet audit
+    verify-contiguity`` CLI does both).
+
+    Attributes:
+        total_entries: Every entry walked.
+        numbered_entries: Entries carrying a valid integer sequence.
+        first_seq / last_seq: Lowest/highest sequence observed, or
+            ``None`` when the chain carries no sequence numbers.
+        gaps: Missing-number runs, in chain order.
+        duplicates: Sequence values that appeared more than once.
+        out_of_order_indices: Chain indices where the sequence did not
+            strictly increase relative to the previous numbered entry.
+        unnumbered_indices: Indices of entries lacking a valid sequence.
+            Empty on a fully-sequenced chain; a non-empty list on a
+            chain that ALSO has numbered entries indicates a dropped
+            marker (tamper). A chain with NO numbered entries was simply
+            written without ``sequence=True`` -- see :attr:`sequenced`.
+        expected_start / expected_end: Operator-declared boundary, if
+            supplied. Lets a caller who knows the true endpoints
+            out-of-band (e.g. from an externally anchored receipt)
+            detect head/tail truncation the chain alone cannot.
+        boundary_breaks: Human-readable mismatches against the declared
+            boundary.
+    """
+
+    total_entries: int
+    numbered_entries: int
+    first_seq: int | None = None
+    last_seq: int | None = None
+    gaps: tuple[ContiguityGap, ...] = field(default_factory=tuple)
+    duplicates: tuple[int, ...] = field(default_factory=tuple)
+    out_of_order_indices: tuple[int, ...] = field(default_factory=tuple)
+    unnumbered_indices: tuple[int, ...] = field(default_factory=tuple)
+    expected_start: int | None = None
+    expected_end: int | None = None
+    boundary_breaks: tuple[str, ...] = field(default_factory=tuple)
+    signet_version: str = _SIGNET_VERSION
+    verified_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+    @property
+    def sequenced(self) -> bool:
+        """``True`` if the chain carries any sequence numbers at all.
+
+        ``False`` means the chain was written without ``sequence=True``;
+        a contiguity check is not applicable and :attr:`ok` is ``False``
+        so callers don't mistake "not sequenced" for "verified
+        complete".
+        """
+        return self.numbered_entries > 0
+
+    @property
+    def ok(self) -> bool:
+        """``True`` only when the chain is sequenced and provably
+        gap-free: no missing runs, no duplicates, no out-of-order
+        entries, no entries missing a number, and no declared-boundary
+        mismatch."""
+        return (
+            self.sequenced
+            and not self.gaps
+            and not self.duplicates
+            and not self.out_of_order_indices
+            and not self.unnumbered_indices
+            and not self.boundary_breaks
+        )
+
+
+def verify_contiguity(
+    backend: AuditBackend,
+    *,
+    expected_start: int | None = None,
+    expected_end: int | None = None,
+) -> ContiguityReport:
+    """Check the monotonic-sequence completeness of a chain.
+
+    Reads each entry's sequence number (see :class:`ContiguityReport`)
+    and reports gaps, duplicates, out-of-order numbering, and entries
+    that are unexpectedly unnumbered. Optionally asserts the chain spans
+    a known ``[expected_start, expected_end]`` range so a caller who
+    knows the true endpoints out-of-band can catch head/tail truncation.
+
+    This function does NOT verify HMACs -- run :class:`ChainVerifier`
+    alongside it, because an unverified sequence number is just an
+    attacker-supplied integer. The ``signet audit verify-contiguity``
+    CLI command pairs the two.
+    """
+    from signet.audit.chain import _entry_seq
+
+    total = 0
+    numbered: list[tuple[int, int]] = []  # (chain_index, seq)
+    unnumbered: list[int] = []
+    for index, entry in enumerate(backend.iter_entries()):
+        total = index + 1
+        seq = _entry_seq(entry)
+        if seq is None:
+            unnumbered.append(index)
+        else:
+            numbered.append((index, seq))
+
+    gaps: list[ContiguityGap] = []
+    duplicates: list[int] = []
+    out_of_order: list[int] = []
+    seen: set[int] = set()
+    prev_seq: int | None = None
+    prev_index = -1
+    for index, seq in numbered:
+        if seq in seen:
+            duplicates.append(seq)
+        seen.add(seq)
+        if prev_seq is not None:
+            if seq <= prev_seq:
+                out_of_order.append(index)
+            elif seq > prev_seq + 1:
+                gaps.append(
+                    ContiguityGap(
+                        after_index=prev_index,
+                        missing_from=prev_seq + 1,
+                        missing_to=seq - 1,
+                    )
+                )
+        prev_seq = seq
+        prev_index = index
+
+    first_seq = numbered[0][1] if numbered else None
+    last_seq = numbered[-1][1] if numbered else None
+
+    boundary_breaks: list[str] = []
+    if expected_start is not None and first_seq is not None and first_seq != expected_start:
+        boundary_breaks.append(
+            f"expected chain to start at seq {expected_start} but first numbered "
+            f"entry is seq {first_seq} "
+            f"({'head truncated' if first_seq > expected_start else 'unexpected earlier entries'})"
+        )
+    if expected_end is not None and last_seq is not None and last_seq != expected_end:
+        boundary_breaks.append(
+            f"expected chain to end at seq {expected_end} but last numbered "
+            f"entry is seq {last_seq} "
+            f"({'tail truncated' if last_seq < expected_end else 'unexpected later entries'})"
+        )
+    # A declared boundary on a chain with no numbers at all is itself a
+    # finding -- the operator expected sequencing that isn't there.
+    if (expected_start is not None or expected_end is not None) and not numbered:
+        boundary_breaks.append("a boundary was declared but the chain carries no sequence numbers")
+
+    return ContiguityReport(
+        total_entries=total,
+        numbered_entries=len(numbered),
+        first_seq=first_seq,
+        last_seq=last_seq,
+        gaps=tuple(gaps),
+        duplicates=tuple(duplicates),
+        out_of_order_indices=tuple(out_of_order),
+        unnumbered_indices=tuple(unnumbered),
+        expected_start=expected_start,
+        expected_end=expected_end,
+        boundary_breaks=tuple(boundary_breaks),
+    )
+
+
 __all__ = [
     "BreakKind",
     "ChainBreak",
     "ChainVerifier",
+    "ContiguityGap",
+    "ContiguityReport",
     "VerificationReport",
+    "verify_contiguity",
     "verify_with_archives",
 ]

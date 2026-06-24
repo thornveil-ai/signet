@@ -25,6 +25,12 @@ and every entry carries non-repudiable attribution to an :class:`Owner`.
 from __future__ import annotations
 
 from signet.audit.backend import MalformedAuditEntry
+from signet.audit.chain import (
+    CANON_JCS_V1,
+    CANON_LEGACY,
+    SEQ_FIELD,
+    HmacChain,
+)
 from signet.audit.compactor import (
     ARCHIVE_FORMAT_VERSION,
     COMPACTION_CHECK_NAME,
@@ -41,19 +47,28 @@ from signet.audit.verifier import (
     BreakKind,
     ChainBreak,
     ChainVerifier,
+    ContiguityGap,
+    ContiguityReport,
     VerificationReport,
+    verify_contiguity,
     verify_with_archives,
 )
 
 __all__: list[str] = [
     "ARCHIVE_FORMAT_VERSION",
+    "CANON_JCS_V1",
+    "CANON_LEGACY",
     "COMPACTION_CHECK_NAME",
     "COMPACTION_MARKER_FIELD",
+    "SEQ_FIELD",
     "ArchiveHeader",
     "BreakKind",
     "ChainBreak",
     "ChainVerifier",
     "CompactionResult",
+    "ContiguityGap",
+    "ContiguityReport",
+    "HmacChain",
     "MalformedAuditEntry",
     "MerkleTree",
     "VerificationReport",
@@ -61,5 +76,6 @@ __all__: list[str] = [
     "is_compaction_marker",
     "read_archive",
     "trim_before_index",
+    "verify_contiguity",
     "verify_with_archives",
 ]

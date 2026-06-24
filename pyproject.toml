@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "signet-sign"
-version = "0.1.10.1"
+version = "0.1.11"
 description = "Capability-based safety gates for LLM agents. The model proposes; signet authorizes."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -63,6 +63,8 @@ openai = ["openai>=1.40"]
 anthropic = ["anthropic>=0.30"]
 langchain = ["langchain-core>=0.2"]
 ed25519 = ["cryptography>=42.0"]
+jcs = ["rfc8785>=0.1.2"]
+pq = ["dilithium-py>=1.0"]
 redis = ["redis>=5.0"]
 prometheus = ["prometheus-client>=0.20"]
 all = [
@@ -70,6 +72,8 @@ all = [
     "anthropic>=0.30",
     "langchain-core>=0.2",
     "cryptography>=42.0",
+    "rfc8785>=0.1.2",
+    "dilithium-py>=1.0",
     "redis>=5.0",
     "prometheus-client>=0.20",
 ]
@@ -84,6 +88,8 @@ dev = [
     "pre-commit>=3.7",
     # Optional-dep stand-ins so the dev environment exercises the full surface
     "cryptography>=42.0",
+    "rfc8785>=0.1.2",
+    "dilithium-py>=1.0",
     "redis>=5.0",
     "fakeredis>=2.20",
     "prometheus-client>=0.20",
@@ -111,6 +117,7 @@ packages = ["src/signet"]
 include = [
     "src/signet",
     "tests",
+    "tools",
     "README.md",
     "LICENSE",
     "NOTICE",
@@ -167,6 +174,13 @@ warn_unused_ignores = true
 [[tool.mypy.overrides]]
 module = ["tests.*"]
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+# The pure-Python ML-DSA reference backend (signet-sign[pq]) ships no
+# py.typed marker. It is reached only through _load_mldsa_backend and
+# its surface is exercised by the pq receipt tests.
+module = ["dilithium_py.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"
