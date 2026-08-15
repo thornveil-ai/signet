@@ -48,13 +48,54 @@ def ollama_url() -> str:
     return os.environ.get("SIGNET_TEST_OLLAMA_URL", "http://localhost:11434/v1")
 
 
+#: Preference order when auto-discovering a local model. Smallest first —
+#: these tests assert proxy behavior, not model quality, so the cheapest
+#: tag that answers is the right one.
+_OLLAMA_MODEL_PREFERENCE = ("gemma4:e2b", "gemma4:e4b", "gemma4:12b", "gemma4:26b")
+
+
+def _discover_ollama_model(url: str, timeout: float = 3.0) -> str | None:
+    """Return an installed Ollama model tag, or ``None`` if none can be listed.
+
+    Prefers a known-small Gemma 4 variant, else falls back to whatever the
+    daemon reports first.
+    """
+    try:
+        resp = httpx.get(url.rstrip("/") + "/models", timeout=timeout)
+        resp.raise_for_status()
+        installed = [
+            m["id"] for m in resp.json().get("data", []) if isinstance(m.get("id"), str)
+        ]
+    except Exception:
+        return None
+
+    if not installed:
+        return None
+    for preferred in _OLLAMA_MODEL_PREFERENCE:
+        if preferred in installed:
+            return preferred
+    return installed[0]
+
+
 @pytest.fixture(scope="session")
-def ollama_model() -> str:
+def ollama_model(ollama_url: str) -> str:
     """Ollama model tag to test against. Override via SIGNET_TEST_OLLAMA_MODEL.
 
-    Default is ``gemma4:e2b`` — fastest of the local Gemma 4 variants.
+    When unset, the tag is discovered from the running daemon rather than
+    hardcoded. A hardcoded default turns "the developer has Ollama, but not
+    this exact tag" into five red integration tests, which is the opposite
+    of this suite's contract: it skips when Ollama is absent, so it should
+    not hard-fail when Ollama is present with a different model. The
+    previous default (``gemma4:e2b``) fails on any box running e4b/12b/26b.
+
+    Discovery order: env var -> installed-model preference list -> first
+    installed model -> the historical default (so the failure message still
+    names a concrete tag when the daemon lists nothing).
     """
-    return os.environ.get("SIGNET_TEST_OLLAMA_MODEL", "gemma4:e2b")
+    override = os.environ.get("SIGNET_TEST_OLLAMA_MODEL")
+    if override:
+        return override
+    return _discover_ollama_model(ollama_url) or "gemma4:e2b"
 
 
 @pytest.fixture(scope="session")
