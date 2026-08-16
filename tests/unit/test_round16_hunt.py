@@ -177,7 +177,9 @@ class TestF_R14_3_InflatingChainAlarmRollback:
 class TestF_R14_4_BfsIterationCap:
     """Random-bytes spirals must complete in bounded wall-clock."""
 
-    def test_324kb_random_spiral_deadline_fires(self) -> None:
+    def test_324kb_random_spiral_deadline_fires(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # The canonical F-R14-4 production repro: a deep base64 spiral
         # over 1 KB of random bytes produces a 324 KB payload that the
         # BFS chews on indefinitely without the deadline cap (R14
@@ -192,6 +194,16 @@ class TestF_R14_4_BfsIterationCap:
         # (``_last_bfs_deadline_exceeded``) directly so the test
         # measures what we actually care about ("the cap engaged")
         # without coupling pass/fail to runner allocation.
+        # F4: the assertion is "the cap engaged", so drive the deadline
+        # to a value the spiral is guaranteed to exceed instead of hoping
+        # the host is slow enough to burn the real 10 s budget. Before
+        # ``_BFS_WALL_BUDGET_SECONDS`` was hoisted to module scope this
+        # was impossible to override, and the test failed on any machine
+        # fast enough to finish the 324 KB spiral inside the budget.
+        import signet.checks.prompt_injection as _pi
+
+        monkeypatch.setattr(_pi, "_BFS_WALL_BUDGET_SECONDS", 0.001)
+
         import os
 
         cur: bytes = os.urandom(1024)

@@ -290,6 +290,19 @@ def main() -> None:
     help="OpenAI-compatible upstream URL (e.g. http://localhost:11434/v1).",
 )
 @click.option(
+    "--request-timeout",
+    "request_timeout_s",
+    type=float,
+    default=None,
+    envvar="SIGNET_REQUEST_TIMEOUT_S",
+    help=(
+        "Seconds to wait for an upstream response (default 120). Raise this "
+        "when fronting a local reasoning model: a long single-shot generation "
+        "returns nothing until it completes, so the whole run must fit inside "
+        "this window or the gate reports ReadTimeout and the work is lost."
+    ),
+)
+@click.option(
     "--host",
     default="127.0.0.1",
     envvar="SIGNET_HOST",
@@ -386,6 +399,7 @@ def main() -> None:
 )
 def serve(
     upstream_url: str,
+    request_timeout_s: float | None,
     host: str,
     port: int,
     audit_log_path: Path | None,
@@ -458,6 +472,9 @@ def serve(
         else None,
         allow_ephemeral_key=allow_ephemeral_key,
         upstream_label=upstream_label,
+        # Omitted -> keep the dataclass default (120s). Passing None here
+        # would fail the numeric validator.
+        **({"request_timeout_s": request_timeout_s} if request_timeout_s is not None else {}),
     )
     # CLI flag wins over the dataclass default (True), and over
     # SIGNET_STRICT_ERROR_REDACTION's env-driven value if both are set.

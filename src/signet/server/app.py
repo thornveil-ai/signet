@@ -91,7 +91,12 @@ from signet.audit.backend import JsonlBackend
 from signet.audit.chain import HmacChain
 from signet.audit.keyring import Key, KeyRing
 from signet.core.audit import AuditEntry, Decision
-from signet.core.context import RequestContext, ResponseContext, get_header_ci
+from signet.core.context import (
+    RequestContext,
+    ResponseContext,
+    ToolCallContext,
+    get_header_ci,
+)
 from signet.core.owner import Owner
 from signet.core.pipeline import Pipeline
 from signet.server.config import ServerConfig
@@ -339,10 +344,49 @@ class SignetApp:
         :attr:`ServerConfig.upstream_pool_max_keepalive_connections` so
         deployments can raise the cap for high-fanout traffic or lower
         it on constrained hosts.
+
+        F2 (event-loop-rebind): the cache below previously keyed on
+        ``is not None`` alone, so a client built on one event loop was
+        reused on the next. ``httpx.AsyncClient`` binds its connection
+        pool to the loop that created it; reusing it elsewhere raises
+        ``RuntimeError: Event loop is closed``, which ``_forward_unary``
+        catches and reports as a 502 ``upstream_exception``.
+
+        That contradicted this method's whole reason for existing. The
+        lazy path is documented as the way an embedder gets a working
+        app *without* driving the lifespan -- but Starlette's
+        ``TestClient``, used outside a ``with`` block, runs each request
+        in its own short-lived loop. The result was a perfectly
+        alternating 200 / 502 / 200 / 502: each 502 discarded the dead
+        client, each 200 re-poisoned the cache for the next request.
+        Under uvicorn there is exactly one long-lived loop, so
+        production never saw it -- which is precisely why it survived.
+
+        The fix records the creating loop alongside the client and
+        rebuilds when the running loop differs or the client has been
+        closed. The stale client is dropped rather than awaited closed:
+        its loop is already gone, so ``aclose()`` cannot run on it.
         """
+        import asyncio
+
+        try:
+            current_loop: object | None = asyncio.get_running_loop()
+        except RuntimeError:  # called outside async context
+            current_loop = None
+
         existing: httpx.AsyncClient | None = getattr(self, "_http", None)
-        if existing is not None:
+        if (
+            existing is not None
+            and not existing.is_closed
+            and getattr(self, "_http_loop", None) is current_loop
+        ):
             return existing
+
+        if existing is not None:
+            # Bound to a dead loop: unusable and un-closeable. Drop the
+            # reference and let GC take it.
+            logger.debug("rebuilding upstream http client (event loop changed or client closed)")
+
         timeout = httpx.Timeout(self.config.request_timeout_s, connect=10.0)
         limits = httpx.Limits(
             max_connections=self.config.upstream_pool_max_connections,
@@ -358,6 +402,9 @@ class SignetApp:
             verify=True,
         )
         self._http = client
+        # F2: remember the loop this pool is bound to so the cache check
+        # above can detect a rebind rather than handing back a dead client.
+        self._http_loop = current_loop
         return client
 
     def _register_exception_handlers(self) -> None:
@@ -574,6 +621,26 @@ class SignetApp:
         @self.app.post("/v1/embeddings/", include_in_schema=False)
         async def embeddings(request: Request) -> Response:
             return await self._handle_embeddings(request)
+
+        # F5: GET /v1/models passthrough.
+        #
+        # Every OpenAI-compatible client calls this to populate a model
+        # picker. Returning 404 "endpoint not implemented" does not degrade
+        # gracefully -- it makes the client look broken. Observed with
+        # RigRun: chat worked perfectly through the gate while the model
+        # list stayed empty, because its backend does
+        # GET {base}/v1/models and got a signet 404. Aider, Goose, Cline
+        # and OpenHands all probe the same endpoint.
+        #
+        # This is metadata, not inference: no request body, no prompt, no
+        # tool call, nothing for ADMISSION/INSPECTION/COMMITMENT to inspect.
+        # Running the content pipeline over an empty body would be
+        # theatre. It is proxied and recorded, so the audit chain still
+        # shows who enumerated the models and when.
+        @self.app.get("/v1/models")
+        @self.app.get("/v1/models/", include_in_schema=False)
+        async def list_models(request: Request) -> Response:
+            return await self._handle_list_models(request)
 
         # WebSocket pass-through for the OpenAI realtime API. ADMISSION
         # runs once at connect time. COMMITMENT runs on every function-
@@ -1201,6 +1268,68 @@ class SignetApp:
         handler = RealtimeHandler(self, websocket)
         await handler.run()
 
+    async def _handle_list_models(self, request: Request) -> Response:
+        """GET /v1/models — read-only passthrough to the upstream (F5).
+
+        Deliberately does NOT run the check pipeline. A model list has no
+        request body: no prompt, no tools, no content. ADMISSION content
+        checks would scan an empty string, and INSPECTION / COMMITMENT have
+        nothing to act on. Running them would produce audit noise that
+        looks like enforcement without being any.
+
+        It IS recorded, so the chain still answers "who enumerated the
+        models, and when". Upstream failures return signet-shaped 502s
+        rather than leaking the upstream body, matching ``_forward_unary``.
+        """
+        import asyncio
+
+        self.metrics.inc("signet_requests_total", {"path": "/v1/models"})
+
+        # There is no RequestContext here (no _admit step, no body), so the
+        # ctx-based _upstream_headers cannot be reused. Build the forward set
+        # directly from the raw request, applying the same CRLF safety check
+        # so this endpoint cannot become a header-injection surface.
+        fwd: dict[str, str] = {}
+        for h in self.config.extra_forward_headers:
+            v = request.headers.get(h) or request.headers.get(h.lower())
+            if v and _header_value_is_safe(v):
+                fwd[h] = v
+
+        client = self._ensure_http()
+        try:
+            upstream = await client.get(
+                f"{self.config.upstream_url.rstrip('/')}/models",
+                headers=fwd,
+            )
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            logger.warning("upstream /models failed: %s: %s", type(exc).__name__, exc)
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": "upstream model list unavailable",
+                    "refusal_kind": "upstream_exception",
+                    "exception": type(exc).__name__,
+                },
+                headers=self._upstream_attribution_headers(None),
+            )
+
+        headers = self._upstream_attribution_headers(upstream.status_code)
+        try:
+            body = upstream.json()
+        except Exception:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": "upstream returned a non-JSON model list",
+                    "refusal_kind": "upstream_protocol_violation",
+                },
+                headers=headers,
+            )
+
+        return JSONResponse(status_code=upstream.status_code, content=body, headers=headers)
+
     async def _handle_embeddings(self, request: Request) -> Response:
         """Embeddings endpoint -- non-streaming, no INSPECTION text content.
 
@@ -1541,6 +1670,19 @@ class SignetApp:
             if isinstance(text, str):
                 rctx.extend_text(text)
         rctx.chunk_count = 1
+
+        # F3: COMMITMENT. Runs before RECORD (post_complete) so the
+        # stage order on the HTTP path matches the documented lifecycle
+        # ADMISSION -> INSPECTION -> COMMITMENT -> RECORD, and so a
+        # refused tool call never reaches the RECORD checks as if it had
+        # been served. A refusal here returns 403 and the upstream body
+        # is discarded -- the caller never receives the tool call it
+        # would have executed.
+        tool_calls = self._extract_response_tool_calls(data)
+        if tool_calls:
+            refusal = await self._gate_tool_calls(ctx, rctx, tool_calls)
+            if refusal is not None:
+                return refusal
 
         # Round 11 ``outer-fallback-leaks-exception-classname-no-
         # correlation_id-no-attribution`` closure: wrap RECORD-stage
@@ -2009,6 +2151,97 @@ class SignetApp:
                                 inspection_aborted = True
                                 return
 
+                            # F3: streaming COMMITMENT. Runs after
+                            # INSPECTION and BEFORE the chunk is yielded,
+                            # so a refused tool call never reaches the
+                            # client. ``pending_tool_calls`` is drained
+                            # here; the buffer queues an index the moment
+                            # its ``function.name`` becomes known, which
+                            # is typically the same chunk that carries it.
+                            if sse_buf.pending_tool_calls:
+                                pending = list(sse_buf.pending_tool_calls)
+                                sse_buf.pending_tool_calls.clear()
+                                commitment_calls: list[tuple[str, dict[str, Any]]] = []
+                                for idx in pending:
+                                    slot = sse_buf.tool_calls.get(idx)
+                                    if not slot or not slot.get("name"):
+                                        continue
+                                    # Arguments are still streaming at this
+                                    # point, so pass what has accumulated so
+                                    # far. Tier gating is name-based; an
+                                    # argument-sensitive check sees a partial
+                                    # payload and should treat it as such.
+                                    commitment_calls.append(
+                                        (
+                                            slot["name"],
+                                            {"_partial_arguments": slot.get("arguments", "")},
+                                        )
+                                    )
+
+                                for tool_name, arguments in commitment_calls:
+                                    tcc = ToolCallContext(
+                                        request=ctx,
+                                        response=rctx,
+                                        tool_name=tool_name,
+                                        arguments=arguments,
+                                        tool_metadata={"streaming": True},
+                                    )
+                                    try:
+                                        commitment = await self.pipeline.inspect_tool_call(tcc)
+                                    except Exception as exc:
+                                        self._record_exception(
+                                            ctx, exc, check_name="pipeline.commitment"
+                                        )
+                                        logger.exception("streaming COMMITMENT pipeline crashed")
+                                        if self.config.shadow:
+                                            continue
+                                        from signet.core.check import CheckResult
+
+                                        commitment = CheckResult.block(
+                                            f"COMMITMENT pipeline raised {type(exc).__name__}",
+                                            _check_name="pipeline.commitment",
+                                            tool_name=tool_name,
+                                        )
+
+                                    if commitment.is_allow:
+                                        self._record_decision(
+                                            ctx,
+                                            result=commitment,
+                                            check_name="pipeline.commitment",
+                                            metadata={"tool_name": tool_name},
+                                        )
+                                        continue
+
+                                    check_name = str(
+                                        commitment.metadata.get(
+                                            "_check_name", "pipeline.commitment"
+                                        )
+                                    )
+                                    entry = self._record_decision(
+                                        ctx,
+                                        result=commitment,
+                                        check_name=check_name,
+                                        metadata={
+                                            "tool_name": tool_name,
+                                            "chunks_delivered": rctx.chunk_count - 1,
+                                            "abort_stage": "commitment",
+                                        },
+                                    )
+                                    if self.config.shadow:
+                                        continue
+
+                                    ctx.scratch["_pending_raw_sse"] = b""
+                                    rctx.finish_reason = "abort"
+                                    for frame in self._build_abort_frames(
+                                        reason=commitment.reason,
+                                        stage="commitment",
+                                        check_name=commitment.metadata.get("_check_name"),
+                                        entry=entry,
+                                    ):
+                                        yield frame
+                                    inspection_aborted = True
+                                    return
+
                             yield complete_bytes
                         # End-of-stream finalize: flush any tail event
                         # whose terminating blank line never arrived
@@ -2458,6 +2691,159 @@ class SignetApp:
         if upstream_status is not None:
             out["X-Signet-Upstream-Status"] = str(upstream_status)
         return out
+
+    # ------------------------------------------------------------------
+    # COMMITMENT on the HTTP path (F3)
+    # ------------------------------------------------------------------
+    #
+    # Before F3, ``pipeline.inspect_tool_call`` had exactly one production
+    # call site: :mod:`signet.server.realtime` (the Realtime WebSocket
+    # path). The HTTP proxy never invoked it, so every COMMITMENT-stage
+    # check -- including :class:`signet.checks.ToolCallInspectorCheck` and
+    # its whole risk-tier registry -- was inert on ``/v1/chat/completions``.
+    #
+    # That is the path every OpenAI-compatible agent harness uses (Aider,
+    # Goose, OpenHands, Cline, RigRun). An operator who configured
+    # ``max_allowed_tier=MEDIUM`` and shipped it got a gate that recorded
+    # the tool call in the audit chain and forwarded it anyway. Verified
+    # against 0.1.10.1: a ``run_command`` call at HIGH tier passed through
+    # with ``decision=allow``.
+    #
+    # The ``ToolCallContext`` docstring in realtime.py describes itself as
+    # "shaped like the HTTP path's tool-call context", which suggests the
+    # HTTP site was assumed to exist rather than deliberately omitted.
+
+    @staticmethod
+    def _extract_response_tool_calls(data: Any) -> list[tuple[str, dict[str, Any]]]:
+        """Pull ``(tool_name, arguments)`` from a non-streaming response body.
+
+        Walks ``choices[].message.tool_calls[]`` (current shape) and
+        ``choices[].message.function_call`` (deprecated single-call shape
+        still emitted by some OpenAI-compatible shims). Arguments arrive
+        as a JSON-encoded string on the wire; they are parsed so checks
+        see structured data, matching the Realtime path's contract. A
+        non-dict or unparseable payload is wrapped as ``{"_raw": ...}``
+        rather than dropped -- a check that gates on arguments must not
+        silently receive ``{}`` for a malformed call.
+        """
+
+        def _parse_args(raw: Any) -> dict[str, Any]:
+            if isinstance(raw, dict):
+                return raw
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    return {"_raw": raw}
+                return parsed if isinstance(parsed, dict) else {"_raw": parsed}
+            return {}
+
+        calls: list[tuple[str, dict[str, Any]]] = []
+        if not isinstance(data, dict):
+            return calls
+        choices = data.get("choices")
+        if not isinstance(choices, list):
+            return calls
+
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if not isinstance(message, dict):
+                continue
+
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for tc in tool_calls:
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function")
+                    if not isinstance(fn, dict):
+                        continue
+                    name = fn.get("name")
+                    if isinstance(name, str) and name:
+                        calls.append((name, _parse_args(fn.get("arguments"))))
+
+            legacy = message.get("function_call")
+            if isinstance(legacy, dict):
+                name = legacy.get("name")
+                if isinstance(name, str) and name:
+                    calls.append((name, _parse_args(legacy.get("arguments"))))
+
+        return calls
+
+    async def _gate_tool_calls(
+        self,
+        ctx: RequestContext,
+        rctx: ResponseContext,
+        calls: list[tuple[str, dict[str, Any]]],
+    ) -> Response | None:
+        """Run COMMITMENT over proposed tool calls; return a refusal or ``None``.
+
+        Returns ``None`` when every call is allowed (or when shadow mode
+        converts a refusal into a pass-through). Returns a ready-to-send
+        refusal :class:`Response` when a call is blocked or escalated and
+        shadow mode is off.
+
+        Fails closed: a crashing COMMITMENT check refuses the response
+        rather than forwarding an ungated tool call, mirroring
+        :meth:`signet.server.realtime._RealtimeBridge._handle_function_call`.
+        """
+        # Imported here rather than at module scope to match the existing
+        # lazy-import convention in this module (see _record_exception).
+        from signet.core.check import CheckResult
+
+        for tool_name, arguments in calls:
+            tcc = ToolCallContext(
+                request=ctx,
+                response=rctx,
+                tool_name=tool_name,
+                arguments=arguments,
+                tool_metadata={},
+            )
+
+            try:
+                result = await self.pipeline.inspect_tool_call(tcc)
+            except Exception as exc:
+                self._record_exception(ctx, exc, check_name="pipeline.commitment")
+                logger.exception("HTTP COMMITMENT pipeline crashed")
+                if self.config.shadow:
+                    continue
+                synthetic = CheckResult.block(
+                    f"COMMITMENT pipeline raised {type(exc).__name__}",
+                    _check_name="pipeline.commitment",
+                    tool_name=tool_name,
+                )
+                entry = self._record_decision(
+                    ctx, result=synthetic, check_name="pipeline.commitment"
+                )
+                return self._refusal(synthetic, entry)
+
+            if result.is_allow:
+                self._record_decision(
+                    ctx,
+                    result=result,
+                    check_name="pipeline.commitment",
+                    metadata={"tool_name": tool_name},
+                )
+                continue
+
+            check_name = str(result.metadata.get("_check_name", "pipeline.commitment"))
+            entry = self._record_decision(
+                ctx,
+                result=result,
+                check_name=check_name,
+                metadata={"tool_name": tool_name},
+            )
+
+            if self.config.shadow:
+                # Shadow: the audit row already carries shadow=True via
+                # _record_decision. Keep forwarding.
+                continue
+
+            return self._refusal(result, entry)
+
+        return None
 
     def _refusal(self, result: Any, entry: AuditEntry | None) -> Response:
         """Translate a BLOCK CheckResult into the appropriate HTTP error.
@@ -4038,6 +4424,20 @@ class _SSEBuffer:
         self._pending_data_bytes: int = 0
         self._inspect_all_lines: bool = inspect_all_lines
         self.dropped_frame_count: int = 0
+        # F3 (streaming COMMITMENT): tool calls arrive fragmented across
+        # SSE events -- ``function.name`` lands in the first delta for a
+        # given ``index``, ``function.arguments`` accumulates over many
+        # subsequent ones. Reassemble per index so the forward path can
+        # run COMMITMENT against a real tool name.
+        #
+        # ``pending_tool_calls`` is a drain-queue of indices whose name
+        # has just become known. Gating on FIRST SIGHT of the name (not
+        # at ``finish_reason == "tool_calls"``) is deliberate: the tier
+        # decision only needs the name, and refusing early means the
+        # arguments never stream to the client at all. Waiting for the
+        # complete call would leak every argument byte before the abort.
+        self.tool_calls: dict[int, dict[str, str]] = {}
+        self.pending_tool_calls: list[int] = []
         # Round 9 ``sse-unparseable-json-event-leaks-raw-bytes``
         # closure: when an event's assembled ``data:`` payload fails
         # JSON parse, the raw bytes had already been buffered by the
@@ -4142,6 +4542,59 @@ class _SSEBuffer:
         self._flush_event(out)
         return "".join(out)
 
+    def _accumulate_tool_calls(self, obj: dict[str, Any]) -> None:
+        """Reassemble fragmented ``delta.tool_calls[]`` across SSE events.
+
+        Queues an index onto :attr:`pending_tool_calls` the first time a
+        non-empty ``function.name`` is seen for it, so the forward path
+        can gate before the arguments finish streaming.
+
+        Defensive throughout: a hostile or merely sloppy upstream can
+        send a non-list ``tool_calls``, a missing ``index``, or a name
+        split across events. Anything unparseable is skipped rather than
+        raised -- this runs inside the inspection path and must never be
+        the reason a stream dies.
+        """
+        choices = obj.get("choices")
+        if not isinstance(choices, list):
+            return
+
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta")
+            if not isinstance(delta, dict):
+                continue
+            fragments = delta.get("tool_calls")
+            if not isinstance(fragments, list):
+                continue
+
+            for frag in fragments:
+                if not isinstance(frag, dict):
+                    continue
+                raw_index = frag.get("index", 0)
+                # bool is an int subclass; reject it explicitly.
+                if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+                    continue
+                fn = frag.get("function")
+                if not isinstance(fn, dict):
+                    continue
+
+                slot = self.tool_calls.setdefault(raw_index, {"name": "", "arguments": ""})
+
+                name_frag = fn.get("name")
+                if isinstance(name_frag, str) and name_frag:
+                    had_name = bool(slot["name"])
+                    # Some shims split the name across events; concatenate
+                    # rather than overwrite so a two-part name resolves.
+                    slot["name"] += name_frag
+                    if not had_name:
+                        self.pending_tool_calls.append(raw_index)
+
+                args_frag = fn.get("arguments")
+                if isinstance(args_frag, str):
+                    slot["arguments"] += args_frag
+
     def _flush_event(self, out: list[str]) -> None:
         if not self._pending_data:
             return
@@ -4168,6 +4621,8 @@ class _SSEBuffer:
             self.dropped_frame_count += 1
             self.malformed_event_seen = True
             return
+
+        self._accumulate_tool_calls(obj)
 
         # Round 15 ``sse-event-level-fields-bypass-inspection`` closure
         # (F-R15-2): pre-fix the HTTP SSE path inspected ONLY
