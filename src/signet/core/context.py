@@ -136,6 +136,29 @@ class ResponseContext:
         accumulated_text_truncated: True once at least one chunk was
             dropped because the cap was hit. INSPECTION checks should
             treat this as a signal that they're seeing only a prefix.
+        output_char_count: Characters of MODEL OUTPUT seen so far --
+            delta/message content and nothing else.
+
+            Distinct from ``len(accumulated_text)``, and the distinction
+            matters. ``accumulated_text`` is the INSPECTION surface: it
+            deliberately includes event-level metadata (``id``,
+            ``model``, and other non-structural strings) because a
+            hostile upstream can smuggle markers through those fields,
+            so they must be scanned. But that metadata repeats on every
+            single chunk, so the inspection surface grows with CHUNK
+            COUNT, not with how much the model actually said.
+
+            Measured against a real vLLM stream: a chunk carrying ONE
+            character of content contributes 58 characters to
+            ``accumulated_text`` (a 41-character ``chatcmpl-`` id, a
+            16-character model name, and the one character). Any budget
+            expressed in "characters the model produced" and evaluated
+            against ``accumulated_text`` is therefore off by whatever
+            the chunk count happens to be -- roughly 45x on a
+            token-per-chunk stream.
+
+            Use this field for output budgets. Use ``accumulated_text``
+            for marker scanning.
         chunk_count: Number of chunks delivered so far.
         finish_reason: Set by the proxy when the stream completes
             (``"stop"``, ``"length"``, ``"tool_calls"``, ``"abort"``).
@@ -150,10 +173,24 @@ class ResponseContext:
     accumulated_text: str = ""
     accumulated_text_cap: int = _DEFAULT_ACCUMULATED_TEXT_CAP
     accumulated_text_truncated: bool = False
+    output_char_count: int = 0
     chunk_count: int = 0
     finish_reason: str | None = None
     usage: dict[str, int] = field(default_factory=dict)
     scratch: dict[str, Any] = field(default_factory=dict)
+
+    def record_output(self, more: str) -> None:
+        """Record model output for budget purposes.
+
+        Call with the delta/message content ONLY -- not with event
+        metadata. Uncapped by design: it is a counter, not a buffer, so
+        it stays accurate on streams long enough to saturate
+        ``accumulated_text_cap``. A budget that silently stops counting
+        once an unrelated memory cap is hit is worse than no budget.
+        """
+        if not more:
+            return
+        self.output_char_count += len(more)
 
     def extend_text(self, more: str) -> None:
         """Append to ``accumulated_text``, enforcing the byte cap.
