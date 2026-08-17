@@ -2025,6 +2025,7 @@ class SignetApp:
                                 extracted = sse_buf.feed(chunk_text)
                                 if extracted:
                                     rctx.extend_text(extracted)
+                                rctx.output_char_count = sse_buf.output_char_count
                                 if sse_buf.malformed_event_seen:
                                     # Treat as upstream protocol
                                     # violation: the inner buffer
@@ -2056,6 +2057,7 @@ class SignetApp:
                             # internal state may now hold the partial
                             # tail line for the next chunk.
                             rctx.extend_text(sse_buf.feed(chunk_text))
+                            rctx.output_char_count = sse_buf.output_char_count
                             # Round 9 ``sse-unparseable-json-event-
                             # leaks-raw-bytes`` closure: if the buffer
                             # flagged a malformed event payload, the
@@ -4456,6 +4458,22 @@ class _SSEBuffer:
         # ``upstream_delta_too_deep`` abort-reason token so dashboards
         # can split walker-cap aborts from JSON-parse-failure aborts.
         self.delta_too_deep_seen: bool = False
+        # Characters of MODEL OUTPUT assembled so far -- delta/message
+        # content only.
+        #
+        # The text returned by ``feed()`` is the INSPECTION surface and
+        # deliberately includes event metadata (``id``, ``model``, and
+        # other non-structural strings), because a hostile upstream can
+        # smuggle markers through those fields. But that metadata repeats
+        # on EVERY chunk, so the inspection surface grows with chunk
+        # count rather than with how much the model said: a chunk
+        # carrying one character of content contributes 58 characters,
+        # of which 57 are a repeated id and model name.
+        #
+        # Any output budget measured against the inspection surface is
+        # therefore wrong by a factor of the chunk count. This counter is
+        # what an output budget should read.
+        self.output_char_count: int = 0
 
     def feed(self, chunk_text: str) -> str:
         """Glue the chunk to any prior partial line, emit completed events.
@@ -4564,7 +4582,14 @@ class _SSEBuffer:
                 continue
             delta = choice.get("delta")
             if not isinstance(delta, dict):
+                # A buffered (non-streaming) event carries the text under
+                # ``message`` rather than ``delta``; count it too so the
+                # output budget is not blind to that shape.
+                message = choice.get("message")
+                if isinstance(message, dict):
+                    self._count_output(message)
                 continue
+            self._count_output(delta)
             fragments = delta.get("tool_calls")
             if not isinstance(fragments, list):
                 continue
@@ -4594,6 +4619,18 @@ class _SSEBuffer:
                 args_frag = fn.get("arguments")
                 if isinstance(args_frag, str):
                     slot["arguments"] += args_frag
+
+    # Fields that carry model output. ``reasoning``/``reasoning_content``
+    # count because a reasoning model spends real generation budget on
+    # them and they stream to the client like any other text.
+    _OUTPUT_TEXT_FIELDS = ("content", "text", "reasoning", "reasoning_content")
+
+    def _count_output(self, holder: dict) -> None:
+        """Add this delta's / message's text length to the output counter."""
+        for key in self._OUTPUT_TEXT_FIELDS:
+            value = holder.get(key)
+            if isinstance(value, str):
+                self.output_char_count += len(value)
 
     def _flush_event(self, out: list[str]) -> None:
         if not self._pending_data:

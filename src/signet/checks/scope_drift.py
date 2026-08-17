@@ -223,9 +223,36 @@ class ScopeDriftCheck(Check):
         max_tokens = ctx.request.body.get("max_tokens")
         if isinstance(max_tokens, int) and max_tokens > 0:
             char_cap = int(max_tokens * self.char_per_token_estimate * (1 + self.token_tolerance))
-            if len(ctx.accumulated_text) > char_cap:
+            # Measure MODEL OUTPUT, not the inspection surface.
+            #
+            # ``accumulated_text`` deliberately includes event-level
+            # metadata -- ``id``, ``model``, and other non-structural
+            # strings -- because a hostile upstream can smuggle markers
+            # through those fields. That metadata repeats on every chunk,
+            # so the inspection surface grows with CHUNK COUNT rather than
+            # with how much the model produced.
+            #
+            # Measured against a real vLLM stream: a chunk carrying one
+            # character of content contributes 58 characters to
+            # ``accumulated_text`` (41-char ``chatcmpl-`` id + 16-char
+            # model name + the one character). Comparing a cap expressed
+            # as ``max_tokens * chars_per_token`` against that number made
+            # the check fire on compliant output at roughly 45x too early
+            # -- observed as 20 consecutive aborts, each landing a few
+            # dozen characters past whatever cap was configured, because
+            # raising the cap only moved where the same runaway counter
+            # crossed it.
+            #
+            # ``output_char_count`` counts delta/message text only. Falls
+            # back to the old measure when a caller supplies a context
+            # that predates the counter, so this cannot silently stop
+            # enforcing.
+            measured = getattr(ctx, "output_char_count", None)
+            if not isinstance(measured, int) or measured <= 0:
+                measured = len(ctx.accumulated_text)
+            if measured > char_cap:
                 return CheckResult.block(
-                    f"output character count {len(ctx.accumulated_text)} "
+                    f"output character count {measured} "
                     f"exceeds scope-drift cap {char_cap} "
                     f"(max_tokens={max_tokens} * {self.char_per_token_estimate} * "
                     f"(1+{self.token_tolerance}))",
