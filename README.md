@@ -1,6 +1,6 @@
 # signet
 
-> **Public OSS. v0.1.4 production.** Apache-2.0 capability-based safety gate for LLM agents.
+> **v0.1 — Apache-2.0, on PyPI. Used in my own projects.** Capability-based safety gate for LLM agents.
 
 [![PyPI](https://img.shields.io/pypi/v/signet-sign.svg)](https://pypi.org/project/signet-sign/)
 [![Docs](https://img.shields.io/badge/docs-thornveil--ai.github.io-blue)](https://thornveil-ai.github.io/signet/)
@@ -15,7 +15,7 @@ rate limits, tool-call inspection, mid-stream abort. Every decision is
 HMAC-chained into a tamper-evident audit log. Drop-in install in front
 of any OpenAI-compatible endpoint.
 
-`pip install signet-sign`. Apache-2.0. Production-ready.
+`pip install signet-sign`. Apache-2.0. Eleven built-in checks.
 
 [Why use this](#why-use-this) · [60-second quickstart](#quickstart) · [Public bug-hunt log](docs/bug-hunt-log.md) · [PyPI](https://pypi.org/project/signet-sign/)
 
@@ -239,7 +239,7 @@ signet bench --mock-upstream --gate p95=10ms
 
 ## What signet does NOT do (and what you do about it)
 
-The OSS is genuinely production-grade; the items below are not gaps in
+The items below are not gaps in
 the gate, they are responsibilities that belong to other layers or
 to Day-2 operational concerns. Read this before deploying.
 

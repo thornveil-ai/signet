@@ -1,6 +1,6 @@
 """Plugin interface -- bring-your-own checks via Python entry points.
 
-The 10 built-in checks in :mod:`signet.checks` cover the most common
+The 11 built-in checks in :mod:`signet.checks` cover the most common
 cases. Anything else -- LLM-as-judge, sandbox preview, your own
 PII detector, custom session-policy logic -- ships as a plugin.
 

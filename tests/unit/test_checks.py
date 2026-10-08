@@ -1,4 +1,4 @@
-"""Tests for the 10 built-in checks in signet.checks.
+"""Tests for the 11 built-in checks in signet.checks.
 
 Coverage strategy: at least one happy-path and one failure-path test per
 check, plus a few targeted tests around the trickier behaviors
