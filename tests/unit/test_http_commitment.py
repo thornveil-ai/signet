@@ -92,9 +92,7 @@ def _sse_stream(tool_name: str) -> str:
             "choices": [
                 {
                     "index": 0,
-                    "delta": {
-                        "tool_calls": [{"index": 0, "function": {"arguments": '{"cmd":'}}]
-                    },
+                    "delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"cmd":'}}]},
                 }
             ]
         },
@@ -126,9 +124,7 @@ def _build(
 
     def handler(request: httpx.Request) -> httpx.Response:
         if sse is not None:
-            return httpx.Response(
-                200, text=sse, headers={"content-type": "text/event-stream"}
-            )
+            return httpx.Response(200, text=sse, headers={"content-type": "text/event-stream"})
         return httpx.Response(200, json=body or _unary_response(None))
 
     pipeline = Pipeline(
@@ -254,9 +250,7 @@ class TestStreamingCommitment:
         assert "signet_abort" not in r.text
         assert "read_file" in r.text
 
-    def test_shadow_streams_through(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_shadow_streams_through(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         c = _build(tmp_path, monkeypatch, sse=_sse_stream("run_command"), shadow=True)
         r = _post(c, stream=True)
         assert "signet_abort" not in r.text

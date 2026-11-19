@@ -177,9 +177,7 @@ class TestF_R14_3_InflatingChainAlarmRollback:
 class TestF_R14_4_BfsIterationCap:
     """Random-bytes spirals must complete in bounded wall-clock."""
 
-    def test_324kb_random_spiral_deadline_fires(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_324kb_random_spiral_deadline_fires(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The canonical F-R14-4 production repro: a deep base64 spiral
         # over 1 KB of random bytes produces a 324 KB payload that the
         # BFS chews on indefinitely without the deadline cap (R14

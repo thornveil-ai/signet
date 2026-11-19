@@ -472,10 +472,11 @@ def serve(
         else None,
         allow_ephemeral_key=allow_ephemeral_key,
         upstream_label=upstream_label,
-        # Omitted -> keep the dataclass default (120s). Passing None here
-        # would fail the numeric validator.
-        **({"request_timeout_s": request_timeout_s} if request_timeout_s is not None else {}),
     )
+    # Omitted -> keep the dataclass default (120s). Setting on cfg runs
+    # ServerConfig's __setattr__ numeric validator.
+    if request_timeout_s is not None:
+        cfg.request_timeout_s = request_timeout_s
     # CLI flag wins over the dataclass default (True), and over
     # SIGNET_STRICT_ERROR_REDACTION's env-driven value if both are set.
     if strict_error_redaction is not None:

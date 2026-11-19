@@ -63,9 +63,7 @@ def _discover_ollama_model(url: str, timeout: float = 3.0) -> str | None:
     try:
         resp = httpx.get(url.rstrip("/") + "/models", timeout=timeout)
         resp.raise_for_status()
-        installed = [
-            m["id"] for m in resp.json().get("data", []) if isinstance(m.get("id"), str)
-        ]
+        installed = [m["id"] for m in resp.json().get("data", []) if isinstance(m.get("id"), str)]
     except Exception:
         return None
 
