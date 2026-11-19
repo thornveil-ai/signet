@@ -45,6 +45,15 @@ def _build_app(
         upstream_url=upstream,
         audit_log_path=audit_path,
         allow_ephemeral_key=True,
+        # These tests assert on the human-readable refusal ``reason``, which
+        # strict redaction deliberately withholds (production ships only
+        # ``{error, correlation_id}`` and keeps detail in the audit chain).
+        # The assertions predate strict redaction becoming the default and
+        # started KeyError-ing on ``reason`` rather than failing on behavior
+        # — the 403s themselves were always correct. Verbose is the
+        # documented integration-time posture (``--no-strict-error-redaction``
+        # / ``--dev``), so opt into it explicitly here.
+        strict_error_redaction=False,
     )
     app = SignetApp(config=config, pipeline=pipeline)
     return TestClient(app.app)
