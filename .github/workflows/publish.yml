@@ -52,36 +52,27 @@ jobs:
     name: Publish to PyPI
     needs: build
     runs-on: ubuntu-latest
-    # Trusted Publishing (PEP 740): the runner mints a short-lived
-    # OIDC token PyPI verifies against the Trusted Publisher binding
-    # configured at pypi.org/manage/account/publishing/. No long-lived
-    # API token in repository secrets. PyPI publishes attestations
-    # for each artifact automatically.
-    #
-    # Setup (one-time, manual): on the PyPI project page, add a
-    # Trusted Publisher with:
-    #   Owner:           thornveil-ai
-    #   Repository:      signet
-    #   Workflow:        publish.yml
-    #   Environment:     (leave blank unless using an environment)
-    #
-    # Until the Trusted Publisher binding exists, this job will fail
-    # on the OIDC token exchange. The previous API-token path can be
-    # restored by re-adding ``password: ${{ secrets.PYPI_API_TOKEN }}``
-    # and removing the ``id-token`` permission.
-    permissions:
-      id-token: write  # required for PEP 740 OIDC token minting
+    # Note: thornveil-ai org actions policy currently allows only
+    # actions/*, github/*, docker/*, softprops/action-gh-release@*, etc.
+    # (pypa/gh-action-pypi-publish is not in the org allowlist, which
+    # caused v0.1.11 to fail with startup_failure). Publishing via
+    # actions/setup-python + twine with PYPI_API_TOKEN stays strictly
+    # inside the org allowlist.
     steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
-      - name: Publish to PyPI (Trusted Publishing)
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist/
-          # No ``password:`` — Trusted Publisher binding handles auth.
-          # Attestations published automatically per PEP 740.
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m pip install --upgrade pip twine
+          python -m twine upload --non-interactive dist/*
 
   github-release:
     name: GitHub release

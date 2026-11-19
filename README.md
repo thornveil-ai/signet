@@ -386,7 +386,7 @@ Recent cycles:
 - v0.1.11: monotonic sequence contiguity (`verify-contiguity`), opt-in
   RFC 8785 JCS canonicalization, experimental post-quantum ML-DSA-65
   receipts, and a zero-install standalone verifier (`tools/verify_standalone.py`).
-- Unreleased (`main`): HTTP-path `COMMITMENT` tool-call gating (unary +
+- v0.1.12: HTTP-path `COMMITMENT` tool-call gating (unary +
   streaming), `ScopeDriftCheck` output-character separation, role-scoped
   `PromptInjectionCheck(roles=...)`, `GET /v1/models` passthrough,
   `--request-timeout`, Ed25519 asymmetric audit chain signing, and

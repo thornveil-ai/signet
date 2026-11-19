@@ -8,6 +8,8 @@ pre-1.0 minor versions may break the API.
 
 ## [Unreleased]
 
+## [0.1.12] -- 2026-11-19
+
 ### Added
 
 - **HTTP-path `COMMITMENT` tool-call gating (#12):** Wired `pipeline.inspect_tool_call` into `/v1/chat/completions` for both unary responses (pre-RECORD, discarding upstream body on refusal) and SSE streaming (gating on first sight of tool name so refused arguments never ship). Covers deprecated `function_call`, honors `--shadow`, and fails closed.
