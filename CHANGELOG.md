@@ -8,6 +8,20 @@ pre-1.0 minor versions may break the API.
 
 ## [Unreleased]
 
+### Added
+
+- **HTTP-path `COMMITMENT` tool-call gating (#12):** Wired `pipeline.inspect_tool_call` into `/v1/chat/completions` for both unary responses (pre-RECORD, discarding upstream body on refusal) and SSE streaming (gating on first sight of tool name so refused arguments never ship). Covers deprecated `function_call`, honors `--shadow`, and fails closed.
+- **Role-scoped `PromptInjectionCheck(roles=...)` (#12):** Optional message-role filter (default `None`, preserving full scanning) so applications with defensive system-prompt phrasing can scope scanning without false positives while still scanning untrusted/missing-role messages.
+- **`GET /v1/models` passthrough & `--request-timeout` CLI flag (#12):** Recorded passthrough so OpenAI-compatible model pickers work through the gate, plus configurable upstream request timeout for long reasoning-model generations.
+- **Ed25519 asymmetric audit chain signing (#14):** `Ed25519Key`, `KeyRing.public_ring()`, and `sig_alg: "ed25519"` support across `HmacChain`, `ChainVerifier`, and `ChainCompactor` with algorithm-to-key-type enforcement while keeping legacy HMAC-SHA256 chains 100% byte-compatible.
+- **`O(delta)` checkpointed incremental chain verification (#14):** `JsonlBackend.file_size()`, `iter_entries_from_offset()`, `ChainCheckpoint`, and `ChainVerifier.verify_incremental()` with truncation, shrink, and mid-file mutation detection.
+
+### Fixed
+
+- **`ScopeDriftCheck` output measurement (#13):** Separated `ResponseContext.output_char_count` (delta/message/reasoning text only) from `accumulated_text` (full inspection surface including SSE metadata) so compliant token-per-chunk streams are not aborted by repeated event metadata.
+- **Event-loop client rebinding (#12):** `_ensure_http` now detects closed/changed event loops instead of reusing a bound `httpx.AsyncClient` across short-lived loops.
+- **In-tree test import isolation:** Added `pythonpath = ["src"]` to `[tool.pytest.ini_options]` in `pyproject.toml` so `pytest` always exercises in-tree `src/signet` rather than an older installed package in `site-packages`.
+
 ## [0.1.11] -- 2026-06-24
 
 ### Completeness, canonicalization, post-quantum, and a zero-install verifier

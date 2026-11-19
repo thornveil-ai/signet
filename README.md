@@ -126,11 +126,11 @@ See [`docs/architecture.md`](docs/architecture.md) for the full design. See [`SE
 | `RegexContentCheck` | ADMISSION | Block / redact patterns in input |
 | `RegexOutputCheck` | INSPECTION | Same matcher against streaming output |
 | `ClassificationGateCheck` | ADMISSION | 5-level UNCLASS → TS/SCI architectural enforcement |
-| `PromptInjectionCheck` | ADMISSION | Pattern + heuristic, NFKC + confusables fold, multi-encoding decoders |
+| `PromptInjectionCheck` | ADMISSION | Pattern + heuristic, NFKC + confusables fold, multi-encoding decoders, optional role scoping (`roles=...`) |
 | `TokenBudgetCheck` | ADMISSION + RECORD | Per-owner output-token quota with reconciliation |
-| `ScopeDriftCheck` | INSPECTION | Token / character / classification-marker drift |
+| `ScopeDriftCheck` | INSPECTION | Output-char / token / classification-marker drift (separates model output from SSE metadata) |
 | `ContinuingConsentCheck` | INSPECTION | Periodic mid-stream owner-authority revalidation |
-| `ToolCallInspectorCheck` | COMMITMENT | Risk-tier gating + tool allowlist |
+| `ToolCallInspectorCheck` | COMMITMENT | Risk-tier gating + tool allowlist on both HTTP (`/v1/chat/completions` unary & streaming) and Realtime WebSocket |
 
 Bring your own via the plugin interface — see [`docs/plugin_dev.md`](docs/plugin_dev.md).
 
@@ -325,16 +325,12 @@ under RFC 8785 (JSON Canonicalization Scheme). It is opt-in and
 self-describing (a signed `_canon` marker), so existing chains are
 unaffected. Optional dep `pip install signet-sign[jcs]`.
 
-### What's symmetric vs. asymmetric (receipts)
+### What's symmetric vs. asymmetric (chains & receipts)
 
-The default `HmacReceiptSigner` is symmetric — fine when the
-verifier is in your trust domain (your own auditor reads your own
-logs). When you hand receipts to outside parties (customers,
-regulators) and want them to be unforgeable by anyone but the proxy,
-swap in `Ed25519ReceiptSigner`. The proxy holds the private key;
-verifiers hold only the public key and cannot forge. Generate keys
-with `signet keys generate-ed25519`. Optional dep
-`pip install signet-sign[ed25519]`.
+Both the audit chain and per-response receipts default to symmetric HMAC-SHA256 — fast and ideal when the verifier lives inside your own trust domain. When you hand audit logs or receipts to outside parties (customers, regulators) and want them unforgeable by anyone except the proxy:
+
+- **Asymmetric audit chains (`Ed25519Key` + `KeyRing.public_ring()`):** `HmacChain` signs entries with an Ed25519 key (`sig_alg: "ed25519"`) while remaining 100% backward-compatible with legacy HMAC-SHA256 logs. External verifiers hold only `public_ring()` and cannot forge entries. Pair with `ChainCheckpoint` + `ChainVerifier.verify_incremental()` for `O(delta)` byte-offset verification with truncation and mid-file mutation detection.
+- **Asymmetric receipts (`Ed25519ReceiptSigner`):** Generate keys with `signet keys generate-ed25519`. Optional dep `pip install signet-sign[ed25519]`.
 
 For receipts that must stay unforgeable against a future quantum
 adversary (harvest-now, decrypt-later), `MLDSAReceiptSigner` signs with
@@ -384,9 +380,17 @@ Recent cycles:
   mode, plugin discovery, audit compaction, WebSocket realtime, etc.)
 - v0.1.6 → v0.1.7: five hunters surfaced ~98 bugs against v0.1.6; v0.1.7
   fixed every P0/HIGH plus most P1/P2, with regression tests gating each.
-- v0.1.7 → v0.1.8: confidence-hunt against v0.1.7 found that 1 P0 (S1)
-  and 2 new HIGH bypasses (N1, N2) survived; v0.1.8 closes them. Probe
-  corpus now 11/11.
+- v0.1.7 → v0.1.9: 29-round hunt-and-fix discipline closed 150+ findings
+  across encoding channels, Unicode confusables, streaming aborts, and
+  plugin discovery hardening (763 → 1,893+ tests).
+- v0.1.11: monotonic sequence contiguity (`verify-contiguity`), opt-in
+  RFC 8785 JCS canonicalization, experimental post-quantum ML-DSA-65
+  receipts, and a zero-install standalone verifier (`tools/verify_standalone.py`).
+- Unreleased (`main`): HTTP-path `COMMITMENT` tool-call gating (unary +
+  streaming), `ScopeDriftCheck` output-character separation, role-scoped
+  `PromptInjectionCheck(roles=...)`, `GET /v1/models` passthrough,
+  `--request-timeout`, Ed25519 asymmetric audit chain signing, and
+  `O(delta)` checkpointed incremental chain verification.
 
 ## Operations cheat sheet
 
