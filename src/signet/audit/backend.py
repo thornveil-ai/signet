@@ -465,9 +465,7 @@ class JsonlBackend:
             raise ValueError(f"byte_offset must be >= 0 (got {byte_offset})")
         if not self._path.exists():
             if byte_offset > 0:
-                raise ValueError(
-                    f"byte_offset {byte_offset} exceeds missing log file size 0"
-                )
+                raise ValueError(f"byte_offset {byte_offset} exceeds missing log file size 0")
             return
         size = self._path.stat().st_size
         if byte_offset > size:
