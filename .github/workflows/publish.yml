@@ -52,12 +52,12 @@ jobs:
     name: Publish to PyPI
     needs: build
     runs-on: ubuntu-latest
-    # Note: thornveil-ai org actions policy currently allows only
-    # actions/*, github/*, docker/*, softprops/action-gh-release@*, etc.
-    # (pypa/gh-action-pypi-publish is not in the org allowlist, which
-    # caused v0.1.11 to fail with startup_failure). Publishing via
-    # actions/setup-python + twine with PYPI_API_TOKEN stays strictly
-    # inside the org allowlist.
+    # Trusted Publishing (PEP 740) without third-party actions:
+    # thornveil-ai's org allowlist permits actions/* (not pypa/*), so we
+    # mint the short-lived PyPI OIDC token directly via GitHub's native
+    # id-token endpoint and upload with twine. No long-lived API secret.
+    permissions:
+      id-token: write
     steps:
       - uses: actions/setup-python@v5
         with:
@@ -66,13 +66,30 @@ jobs:
         with:
           name: dist
           path: dist/
-      - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      - name: Publish to PyPI (Trusted Publishing via OIDC)
         run: |
           python -m pip install --upgrade pip twine
-          python -m twine upload --non-interactive dist/*
+          python - <<'PY'
+          import json, os, subprocess, urllib.request
+
+          req_url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=pypi"
+          req_tok = os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+          req = urllib.request.Request(req_url, headers={"Authorization": f"Bearer {req_tok}"})
+          with urllib.request.urlopen(req, timeout=30) as r:
+              oidc_jwt = json.loads(r.read().decode())["value"]
+
+          mint = urllib.request.Request(
+              "https://pypi.org/account/oidc/mint-token",
+              data=json.dumps({"token": oidc_jwt}).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(mint, timeout=30) as r:
+              pypi_token = json.loads(r.read().decode())["token"]
+
+          env = {**os.environ, "TWINE_USERNAME": "__token__", "TWINE_PASSWORD": pypi_token}
+          subprocess.run(["python", "-m", "twine", "upload", "--non-interactive", "dist/*"], env=env, check=True)
+          PY
 
   github-release:
     name: GitHub release
