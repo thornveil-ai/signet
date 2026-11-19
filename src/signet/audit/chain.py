@@ -26,8 +26,6 @@ Concurrency:
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import logging
 import threading
@@ -42,7 +40,7 @@ from signet.audit.anchor import (
     NoopAnchor,
 )
 from signet.audit.backend import AuditBackend
-from signet.audit.keyring import KeyRing
+from signet.audit.keyring import ALG_HMAC_SHA256, KeyRing
 from signet.core.audit import AuditEntry
 
 logger = logging.getLogger("signet.audit.chain")
@@ -50,6 +48,11 @@ logger = logging.getLogger("signet.audit.chain")
 #: Field name embedded in entry metadata to identify the signing key.
 #: Verification reads this to look up the right key in the :class:`KeyRing`.
 KEY_ID_FIELD = "_signing_key_id"
+
+#: Field name embedded in entry metadata to identify the signing algorithm
+#: when non-default asymmetric signing (e.g. ``ed25519``) is active.
+#: Absent means legacy ``hmac-sha256`` so existing chains stay byte-identical.
+ALG_FIELD = "_signing_alg"
 
 #: Field name (in entry metadata) recording which canonicalization scheme
 #: produced this entry's signed payload. ABSENT means legacy compact-JSON
@@ -218,31 +221,33 @@ class HmacChain:
         ``require_anchor_success=True``.
         """
         active = self._keyring.active
+        if not active.can_sign:
+            raise ValueError(
+                f"Active key {active.key_id!r} ({active.algorithm}) is verify-only and cannot sign entries"
+            )
 
-        # Fields stamped into metadata BEFORE signing so the chain HMAC
+        # Fields stamped into metadata BEFORE signing so the chain signature
         # binds them: the signing-key ID always, plus (when enabled) the
-        # canonicalization marker and the monotonic sequence number.
-        # Both the tentative and final payloads carry the identical set
-        # so the entry's identity is stable across the anchor round-trip.
+        # signing algorithm (for non-HMAC keys), canonicalization marker,
+        # and monotonic sequence number. Both tentative and final payloads
+        # carry the identical set so identity is stable across anchoring.
         stamped: dict[str, Any] = {KEY_ID_FIELD: active.key_id}
+        if active.algorithm != ALG_HMAC_SHA256:
+            stamped[ALG_FIELD] = active.algorithm
         if self._canon != CANON_LEGACY:
             stamped[CANON_FIELD] = self._canon
         if self._sequence:
             stamped[SEQ_FIELD] = self._read_prev_seq() + 1
 
-        # First pass: compute a tentative HMAC over the payload
-        # WITHOUT the anchor receipt. The tentative HMAC is what we
-        # submit to the anchor backend -- anchoring the input to the
-        # signing function, not the output, keeps the order of
-        # operations clean (anchor commits to the entry's identity,
-        # the chain HMAC commits to the anchor receipt + payload).
+        # First pass: compute a tentative signature over the payload
+        # WITHOUT the anchor receipt.
         tentative_with_key = replace(
             entry,
             metadata={**entry.metadata, **stamped},
             prev_hmac=prev_hmac,
         )
         tentative_payload = _serialize_for_signing(tentative_with_key)
-        tentative_hmac = hmac.new(active.secret, tentative_payload, hashlib.sha256).hexdigest()
+        tentative_hmac = active.sign(tentative_payload)
 
         # Anchor the tentative HMAC. NoopAnchor returns success
         # immediately; real backends do an external HTTP call.
@@ -307,7 +312,7 @@ class HmacChain:
             prev_hmac=prev_hmac,
         )
         payload = _serialize_for_signing(entry_with_anchor)
-        new_hmac = hmac.new(active.secret, payload, hashlib.sha256).hexdigest()
+        new_hmac = active.sign(payload)
         return entry_with_anchor.with_chain_links(prev_hmac=prev_hmac, hmac=new_hmac)
 
     def _read_prev_hmac(self) -> str:

@@ -34,18 +34,25 @@ archive walking) ``signet audit verify --including-archives``.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from signet import __version__ as _SIGNET_VERSION
-from signet.audit.backend import AuditBackend, MalformedAuditEntry
-from signet.audit.chain import KEY_ID_FIELD, _serialize_for_signing
-from signet.audit.keyring import KeyRing
+from signet.audit.backend import AuditBackend, JsonlBackend, MalformedAuditEntry
+from signet.audit.chain import (
+    ALG_FIELD,
+    KEY_ID_FIELD,
+    SEQ_FIELD,
+    _entry_seq,
+    _serialize_for_signing,
+)
+from signet.audit.keyring import ALG_ED25519, ALG_HMAC_SHA256, KeyRing
 from signet.core.audit import AuditEntry
+
+_KNOWN_SIGNING_ALGS = frozenset({ALG_HMAC_SHA256, ALG_ED25519})
 
 
 class BreakKind(StrEnum):
@@ -116,6 +123,72 @@ class ChainBreak:
     detail: str
     """Human-readable rationale, including expected/actual fragments
     where relevant."""
+
+
+@dataclass(frozen=True, slots=True)
+class ChainCheckpoint:
+    """Verified chain tail state enabling O(delta) incremental verification.
+
+    Persist this checkpoint (via :meth:`to_dict` / :meth:`from_dict`) after
+    a clean verification pass, then pass it to
+    :meth:`ChainVerifier.verify_incremental` on subsequent checks so only
+    newly appended entries are read and cryptographically verified.
+
+    Attributes:
+        last_verified_index: Zero-based index of the last cleanly verified
+            entry.
+        last_verified_hmac: Signature/HMAC of the entry at
+            ``last_verified_index``. The very next appended entry's
+            ``prev_hmac`` MUST match this value.
+        last_verified_seq: Monotonic ``_seq`` value of the entry at
+            ``last_verified_index`` when sequencing is enabled, else ``None``.
+        file_offset: End-of-line byte offset in a :class:`JsonlBackend` log
+            immediately after ``last_verified_index``. When present,
+            :meth:`ChainVerifier.verify_incremental` seeks directly to this
+            offset in O(1) without scanning historical lines.
+        signet_version: Signet version that produced this checkpoint.
+        verified_at: UTC ISO-8601 timestamp when verification completed.
+    """
+
+    last_verified_index: int
+    last_verified_hmac: str
+    last_verified_seq: int | None = None
+    file_offset: int | None = None
+    signet_version: str = _SIGNET_VERSION
+    verified_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "last_verified_index": self.last_verified_index,
+            "last_verified_hmac": self.last_verified_hmac,
+            "last_verified_seq": self.last_verified_seq,
+            "file_offset": self.file_offset,
+            "signet_version": self.signet_version,
+            "verified_at": self.verified_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ChainCheckpoint:
+        raw_idx = data["last_verified_index"]
+        if isinstance(raw_idx, bool) or not isinstance(raw_idx, int):
+            raise ValueError("last_verified_index must be an int")
+        raw_hmac = data["last_verified_hmac"]
+        if not isinstance(raw_hmac, str):
+            raise ValueError("last_verified_hmac must be a str")
+        raw_seq = data.get("last_verified_seq")
+        if raw_seq is not None and (isinstance(raw_seq, bool) or not isinstance(raw_seq, int)):
+            raise ValueError("last_verified_seq must be an int or None")
+        raw_off = data.get("file_offset")
+        if raw_off is not None and (isinstance(raw_off, bool) or not isinstance(raw_off, int)):
+            raise ValueError("file_offset must be an int or None")
+        return cls(
+            last_verified_index=raw_idx,
+            last_verified_hmac=raw_hmac,
+            last_verified_seq=raw_seq,
+            file_offset=raw_off,
+            signet_version=str(data.get("signet_version", _SIGNET_VERSION)),
+            verified_at=str(data.get("verified_at", datetime.now(UTC).isoformat())),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,106 +331,15 @@ class ChainVerifier:
                     # A clean link ends any active cascade.
                     _flush_cascade()
 
-                # Identify which key signed this entry. The legitimate
-                # absence path is ``metadata`` carries no
-                # ``_signing_key_id`` at all (None) or the empty string
-                # sentinel: surface as ``MISSING_KEY_ID``. Any present-
-                # but-not-a-string value (list, dict, int, etc.) is a
-                # tampered row -- see F-R25-1 closure below.
-                key_id = entry.metadata.get(KEY_ID_FIELD)
-                if key_id is None or key_id == "":
-                    breaks.append(
-                        ChainBreak(
-                            index=index,
-                            entry_id=entry.entry_id,
-                            kind=BreakKind.MISSING_KEY_ID,
-                            detail=f"entry has no {KEY_ID_FIELD!r} field in metadata",
-                        )
-                    )
-                    prev_hmac = entry.hmac
-                    continue
-
-                # Round 25 MED (F-R25-1): a tampered ``_signing_key_id``
-                # of unhashable type (list, dict, set) would crash
-                # ``KeyRing.get`` with a raw ``TypeError: unhashable
-                # type`` traceback, bypassing the structured-break
-                # channel that R23-5 closed for top-level fields. Reject
-                # any non-string ``key_id`` here and surface as a
-                # ``MALFORMED_LINE`` break -- the same routing
-                # tampered-on-disk lines already get via
-                # ``MalformedAuditEntry``. This also catches empty
-                # containers (``[]``, ``{}``) that the falsy check
-                # above intentionally narrows past, since they're
-                # tamper shapes that don't match the
-                # ``MISSING_KEY_ID`` semantics. Hashable-but-wrong-type
-                # cases (int=42) used to route through ``UNKNOWN_KEY``
-                # via ``legacy.get(<int>) -> None`` -- they now route
-                # through ``MALFORMED_LINE`` so the schema invariant
-                # is uniform: ``_signing_key_id`` is always either
-                # absent or a non-empty ``str``.
-                if not isinstance(key_id, str):
-                    breaks.append(
-                        ChainBreak(
-                            index=index,
-                            entry_id=entry.entry_id,
-                            kind=BreakKind.MALFORMED_LINE,
-                            detail=(
-                                f"{KEY_ID_FIELD!r} must be a string, got {type(key_id).__name__}"
-                            ),
-                        )
-                    )
-                    prev_hmac = entry.hmac
-                    continue
-
-                key = self._keyring.get(key_id)
-                if key is None:
-                    breaks.append(
-                        ChainBreak(
-                            index=index,
-                            entry_id=entry.entry_id,
-                            kind=BreakKind.UNKNOWN_KEY,
-                            detail=(
-                                f"entry signed with key_id={key_id!r} but that key is "
-                                f"not in the ring (known: {', '.join(self._keyring.all_known_ids())})"
-                            ),
-                        )
-                    )
-                    prev_hmac = entry.hmac
-                    continue
-
-                # Self check: recompute the HMAC and compare
-                try:
-                    expected_payload = _serialize_for_signing(entry)
-                except (ValueError, RuntimeError) as exc:
-                    # A non-canonicalizable payload (NaN/Inf in metadata,
-                    # an unknown/tampered _canon marker, or a missing JCS
-                    # backend) must not crash the walk. Surface it as a
-                    # structured MALFORMED_LINE break and move on.
-                    breaks.append(
-                        ChainBreak(
-                            index=index,
-                            entry_id=entry.entry_id,
-                            kind=BreakKind.MALFORMED_LINE,
-                            detail=f"entry payload is not canonicalizable: {exc}",
-                        )
-                    )
-                    prev_hmac = entry.hmac
-                    continue
-                expected_hmac = hmac.new(key.secret, expected_payload, hashlib.sha256).hexdigest()
-                if not hmac.compare_digest(expected_hmac, entry.hmac):
-                    if not link_break_at_this_index:
-                        breaks.append(
-                            ChainBreak(
-                                index=index,
-                                entry_id=entry.entry_id,
-                                kind=BreakKind.SELF_MISMATCH,
-                                detail=(
-                                    f"recomputed hmac={expected_hmac[:16]}... does not match "
-                                    f"stored hmac={entry.hmac[:16]}..."
-                                ),
-                            )
-                        )
-                else:
+                # Self check: verify algorithm marker + cryptographic signature
+                ok_self = _verify_entry_self(
+                    index=index,
+                    entry=entry,
+                    keyring=self._keyring,
+                    breaks=breaks,
+                    suppress_self_mismatch=link_break_at_this_index,
+                )
+                if ok_self:
                     last_good_idx = index
                     last_good_hmac = entry.hmac
 
@@ -384,6 +366,306 @@ class ChainVerifier:
             breaks=tuple(breaks),
             last_known_good_index=last_good_idx,
             last_known_good_hmac=last_good_hmac,
+        )
+
+    def verify_incremental(
+        self,
+        checkpoint: ChainCheckpoint | None = None,
+    ) -> tuple[VerificationReport, ChainCheckpoint | None]:
+        """Verify only entries appended after ``checkpoint`` in O(delta) time.
+
+        When ``checkpoint`` is ``None`` (or ``last_verified_index < 0``), runs
+        a full verification pass from index 0 and returns a fresh checkpoint
+        if the chain verified cleanly with at least one entry.
+
+        When ``checkpoint`` is provided:
+        * For :class:`JsonlBackend` with a recorded ``file_offset``, seeks
+          directly to ``file_offset`` without re-reading historical entries.
+          File truncation (``file_size < file_offset``) surfaces immediately
+          as a ``LINK_MISMATCH`` break.
+        * For other backends, verifies the anchor entry at
+          ``last_verified_index`` still matches ``last_verified_hmac`` (detecting
+          truncation or prefix rewrite), then cryptographically verifies only
+          newly appended tail entries.
+        * If ``last_verified_seq`` is set, also enforces contiguous ``_seq``
+          progression across newly appended entries.
+
+        Returns ``(report, updated_checkpoint)``. ``updated_checkpoint`` is
+        ``None`` when verification detected breaks or the chain is empty.
+        """
+        if checkpoint is None or checkpoint.last_verified_index < 0:
+            if isinstance(self._backend, JsonlBackend):
+                return self._verify_jsonl_tail(
+                    start_index=0,
+                    prev_hmac="",
+                    expected_seq=None,
+                    byte_offset=0,
+                )
+            report = self.verify()
+            if not report.ok or report.total_entries == 0:
+                return report, None
+            tail = self._backend.last_entry()
+            tail_seq = _entry_seq(tail) if tail is not None else None
+            return report, ChainCheckpoint(
+                last_verified_index=report.last_known_good_index,
+                last_verified_hmac=report.last_known_good_hmac,
+                last_verified_seq=tail_seq,
+                file_offset=None,
+                signet_version=report.signet_version,
+                verified_at=report.verified_at,
+            )
+
+        if isinstance(self._backend, JsonlBackend) and checkpoint.file_offset is not None:
+            current_size = self._backend.file_size()
+            if current_size < checkpoint.file_offset:
+                brk = ChainBreak(
+                    index=checkpoint.last_verified_index,
+                    entry_id="",
+                    kind=BreakKind.LINK_MISMATCH,
+                    detail=(
+                        f"log file truncated: size {current_size} < checkpoint "
+                        f"file_offset {checkpoint.file_offset}"
+                    ),
+                )
+                return (
+                    VerificationReport(
+                        total_entries=checkpoint.last_verified_index + 1,
+                        breaks=(brk,),
+                        last_known_good_index=-1,
+                        last_known_good_hmac="",
+                    ),
+                    None,
+                )
+            return self._verify_jsonl_tail(
+                start_index=checkpoint.last_verified_index + 1,
+                prev_hmac=checkpoint.last_verified_hmac,
+                expected_seq=(
+                    checkpoint.last_verified_seq + 1
+                    if checkpoint.last_verified_seq is not None
+                    else None
+                ),
+                byte_offset=checkpoint.file_offset,
+            )
+
+        # Generic backend path: confirm anchor entry still matches checkpoint, then verify tail.
+        breaks: list[ChainBreak] = []
+        anchor_found = False
+        prev_hmac = checkpoint.last_verified_hmac
+        last_good_idx = checkpoint.last_verified_index
+        last_good_hmac = checkpoint.last_verified_hmac
+        last_seq = checkpoint.last_verified_seq
+        expected_seq = last_seq + 1 if last_seq is not None else None
+        total_entries = 0
+
+        try:
+            for index, entry in enumerate(self._backend.iter_entries()):
+                total_entries = index + 1
+                if index < checkpoint.last_verified_index:
+                    continue
+                if index == checkpoint.last_verified_index:
+                    anchor_found = True
+                    if entry.hmac != checkpoint.last_verified_hmac:
+                        breaks.append(
+                            ChainBreak(
+                                index=index,
+                                entry_id=entry.entry_id,
+                                kind=BreakKind.LINK_MISMATCH,
+                                detail=(
+                                    f"checkpoint anchor hmac={checkpoint.last_verified_hmac[:16]}... "
+                                    f"does not match entry at index {index} ({entry.hmac[:16]}...)"
+                                ),
+                            )
+                        )
+                        return (
+                            VerificationReport(
+                                total_entries=total_entries,
+                                breaks=tuple(breaks),
+                                last_known_good_index=-1,
+                                last_known_good_hmac="",
+                            ),
+                            None,
+                        )
+                    continue
+
+                link_break = False
+                if entry.prev_hmac != prev_hmac:
+                    breaks.append(
+                        ChainBreak(
+                            index=index,
+                            entry_id=entry.entry_id,
+                            kind=BreakKind.LINK_MISMATCH,
+                            detail=(
+                                f"prev_hmac={entry.prev_hmac[:16]}... does not match "
+                                f"previous entry's hmac={prev_hmac[:16] or '(empty)'}..."
+                            ),
+                        )
+                    )
+                    link_break = True
+
+                if expected_seq is not None:
+                    actual_seq = _entry_seq(entry)
+                    if actual_seq != expected_seq:
+                        breaks.append(
+                            ChainBreak(
+                                index=index,
+                                entry_id=entry.entry_id,
+                                kind=BreakKind.LINK_MISMATCH,
+                                detail=(
+                                    f"sequence gap at index {index}: expected "
+                                    f"{SEQ_FIELD}={expected_seq}, got {actual_seq!r}"
+                                ),
+                            )
+                        )
+                    expected_seq = (actual_seq + 1) if actual_seq is not None else expected_seq + 1
+
+                if _verify_entry_self(
+                    index=index,
+                    entry=entry,
+                    keyring=self._keyring,
+                    breaks=breaks,
+                    suppress_self_mismatch=link_break,
+                ):
+                    last_good_idx = index
+                    last_good_hmac = entry.hmac
+                    last_seq = _entry_seq(entry)
+                prev_hmac = entry.hmac
+        except MalformedAuditEntry as exc:
+            breaks.append(
+                ChainBreak(
+                    index=total_entries,
+                    entry_id="",
+                    kind=BreakKind.MALFORMED_LINE,
+                    detail=f"line {exc.line_number}: cannot parse as JSON: {exc.parse_error}",
+                )
+            )
+
+        if not anchor_found:
+            breaks.append(
+                ChainBreak(
+                    index=checkpoint.last_verified_index,
+                    entry_id="",
+                    kind=BreakKind.LINK_MISMATCH,
+                    detail=(
+                        f"chain truncated: has {total_entries} entries, expected checkpoint "
+                        f"anchor at index {checkpoint.last_verified_index}"
+                    ),
+                )
+            )
+
+        report = VerificationReport(
+            total_entries=total_entries,
+            breaks=tuple(breaks),
+            last_known_good_index=last_good_idx if anchor_found else -1,
+            last_known_good_hmac=last_good_hmac if anchor_found else "",
+        )
+        if not report.ok or report.total_entries == 0:
+            return report, None
+        return report, ChainCheckpoint(
+            last_verified_index=report.last_known_good_index,
+            last_verified_hmac=report.last_known_good_hmac,
+            last_verified_seq=last_seq,
+            file_offset=None,
+            signet_version=report.signet_version,
+            verified_at=report.verified_at,
+        )
+
+    def _verify_jsonl_tail(
+        self,
+        *,
+        start_index: int,
+        prev_hmac: str,
+        expected_seq: int | None,
+        byte_offset: int,
+    ) -> tuple[VerificationReport, ChainCheckpoint | None]:
+        assert isinstance(self._backend, JsonlBackend)
+        breaks: list[ChainBreak] = []
+        last_good_idx = start_index - 1
+        last_good_hmac = prev_hmac
+        last_seq = (expected_seq - 1) if expected_seq is not None else None
+        last_offset = byte_offset
+        index = start_index
+        cur_prev = prev_hmac
+        cur_expected_seq = expected_seq
+
+        try:
+            for entry, end_off in self._backend.iter_entries_from_offset(
+                byte_offset,
+                start_line=start_index + 1,
+            ):
+                link_break = False
+                if entry.prev_hmac != cur_prev:
+                    breaks.append(
+                        ChainBreak(
+                            index=index,
+                            entry_id=entry.entry_id,
+                            kind=BreakKind.LINK_MISMATCH,
+                            detail=(
+                                f"prev_hmac={entry.prev_hmac[:16]}... does not match "
+                                f"previous entry's hmac={cur_prev[:16] or '(empty)'}..."
+                            ),
+                        )
+                    )
+                    link_break = True
+
+                entry_seq = _entry_seq(entry)
+                if cur_expected_seq is not None:
+                    if entry_seq != cur_expected_seq:
+                        breaks.append(
+                            ChainBreak(
+                                index=index,
+                                entry_id=entry.entry_id,
+                                kind=BreakKind.LINK_MISMATCH,
+                                detail=(
+                                    f"sequence gap at index {index}: expected "
+                                    f"{SEQ_FIELD}={cur_expected_seq}, got {entry_seq!r}"
+                                ),
+                            )
+                        )
+                    cur_expected_seq = (
+                        entry_seq + 1 if entry_seq is not None else cur_expected_seq + 1
+                    )
+                elif entry_seq is not None and index == 0:
+                    cur_expected_seq = entry_seq + 1
+
+                if _verify_entry_self(
+                    index=index,
+                    entry=entry,
+                    keyring=self._keyring,
+                    breaks=breaks,
+                    suppress_self_mismatch=link_break,
+                ):
+                    last_good_idx = index
+                    last_good_hmac = entry.hmac
+                    last_seq = entry_seq
+                    last_offset = end_off
+                cur_prev = entry.hmac
+                index += 1
+        except MalformedAuditEntry as exc:
+            breaks.append(
+                ChainBreak(
+                    index=index,
+                    entry_id="",
+                    kind=BreakKind.MALFORMED_LINE,
+                    detail=f"line {exc.line_number}: cannot parse as JSON: {exc.parse_error}",
+                )
+            )
+
+        total_entries = index
+        report = VerificationReport(
+            total_entries=total_entries,
+            breaks=tuple(breaks),
+            last_known_good_index=last_good_idx,
+            last_known_good_hmac=last_good_hmac,
+        )
+        if not report.ok or total_entries == 0:
+            return report, None
+        return report, ChainCheckpoint(
+            last_verified_index=last_good_idx,
+            last_verified_hmac=last_good_hmac,
+            last_verified_seq=last_seq,
+            file_offset=last_offset,
+            signet_version=report.signet_version,
+            verified_at=report.verified_at,
         )
 
 
@@ -452,6 +734,37 @@ def _verify_entry_self(
         )
         return False
 
+    raw_alg = entry.metadata.get(ALG_FIELD)
+    if raw_alg is None:
+        claimed_alg = ALG_HMAC_SHA256
+    elif not isinstance(raw_alg, str) or raw_alg not in _KNOWN_SIGNING_ALGS:
+        breaks.append(
+            ChainBreak(
+                index=index,
+                entry_id=entry.entry_id,
+                kind=BreakKind.MALFORMED_LINE,
+                detail=f"{ALG_FIELD!r} has unknown or invalid value {raw_alg!r}",
+            )
+        )
+        return False
+    else:
+        claimed_alg = raw_alg
+
+    if key.algorithm != claimed_alg:
+        if not suppress_self_mismatch:
+            breaks.append(
+                ChainBreak(
+                    index=index,
+                    entry_id=entry.entry_id,
+                    kind=BreakKind.SELF_MISMATCH,
+                    detail=(
+                        f"algorithm mismatch: entry claims {claimed_alg!r} but key "
+                        f"{key_id!r} uses {key.algorithm!r}"
+                    ),
+                )
+            )
+        return False
+
     try:
         expected_payload = _serialize_for_signing(entry)
     except (ValueError, RuntimeError) as exc:
@@ -464,8 +777,19 @@ def _verify_entry_self(
             )
         )
         return False
-    expected_hmac = hmac.new(key.secret, expected_payload, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected_hmac, entry.hmac):
+    try:
+        verified = key.verify(expected_payload, entry.hmac)
+    except RuntimeError as exc:
+        breaks.append(
+            ChainBreak(
+                index=index,
+                entry_id=entry.entry_id,
+                kind=BreakKind.MALFORMED_LINE,
+                detail=f"signature verification backend unavailable: {exc}",
+            )
+        )
+        return False
+    if not verified:
         if not suppress_self_mismatch:
             breaks.append(
                 ChainBreak(
@@ -473,8 +797,8 @@ def _verify_entry_self(
                     entry_id=entry.entry_id,
                     kind=BreakKind.SELF_MISMATCH,
                     detail=(
-                        f"recomputed hmac={expected_hmac[:16]}... does not match "
-                        f"stored hmac={entry.hmac[:16]}..."
+                        f"stored {key.algorithm} signature {entry.hmac[:16]}... "
+                        f"failed verification under key {key_id!r}"
                     ),
                 )
             )

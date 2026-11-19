@@ -805,31 +805,15 @@ def compact_audit_log(
         )
 
 
-def _compute_marker_signature(
+def _marker_signature_payload(
     *,
-    secret: bytes,
     archive_format_version: int,
     archive_path: str,
     compacted_count: int,
     merkle_root: str,
     range_start: str,
     range_end: str,
-) -> str:
-    """Compute the keyring-MAC stamped into a compaction marker (LOW-1).
-
-    HMAC-SHA256 over a canonical JSON encoding of the marker's
-    identifying fields, with a fixed domain-separation prefix. The
-    inputs match the marker payload (less the signature itself) so
-    verification is byte-for-byte deterministic.
-
-    A user-supplied entry cannot produce a matching signature without
-    the keyring secret. The compactor's A2 guard runs the verified
-    form (:func:`is_compaction_marker`), so an attacker-crafted marker
-    can no longer DoS future compactions.
-    """
-    import hashlib
-    import hmac as _hmac
-
+) -> bytes:
     canonical = json.dumps(
         {
             "archive_format_version": archive_format_version,
@@ -844,11 +828,32 @@ def _compute_marker_signature(
         allow_nan=False,
         ensure_ascii=False,
     ).encode("utf-8")
-    return _hmac.new(
-        secret,
-        _MARKER_SIG_DOMAIN + canonical,
-        hashlib.sha256,
-    ).hexdigest()
+    return _MARKER_SIG_DOMAIN + canonical
+
+
+def _compute_marker_signature(
+    *,
+    secret: bytes,
+    archive_format_version: int,
+    archive_path: str,
+    compacted_count: int,
+    merkle_root: str,
+    range_start: str,
+    range_end: str,
+) -> str:
+    """Compute the keyring-MAC stamped into a compaction marker (LOW-1)."""
+    import hashlib
+    import hmac as _hmac
+
+    payload = _marker_signature_payload(
+        archive_format_version=archive_format_version,
+        archive_path=archive_path,
+        compacted_count=compacted_count,
+        merkle_root=merkle_root,
+        range_start=range_start,
+        range_end=range_end,
+    )
+    return _hmac.new(secret, payload, hashlib.sha256).hexdigest()
 
 
 def _sign_compaction_marker(
@@ -874,17 +879,19 @@ def _sign_compaction_marker(
     forge markers (a forged marker would otherwise DoS future
     compactions via the A2 guard).
     """
-    import hashlib
-    import hmac as _hmac
     from dataclasses import replace
 
     from signet.audit.anchor import ANCHOR_FIELD, AnchorReceipt
-    from signet.audit.chain import KEY_ID_FIELD, _serialize_for_signing
+    from signet.audit.chain import ALG_FIELD, KEY_ID_FIELD, _serialize_for_signing
+    from signet.audit.keyring import ALG_HMAC_SHA256
 
     active = chain._keyring.active
+    if not active.can_sign:
+        raise ValueError(
+            f"Active key {active.key_id!r} ({active.algorithm}) is verify-only and cannot sign compaction markers"
+        )
 
-    marker_signature = _compute_marker_signature(
-        secret=active.secret,
+    marker_sig_payload = _marker_signature_payload(
         archive_format_version=ARCHIVE_FORMAT_VERSION,
         archive_path=str(archive_path),
         compacted_count=compacted_count,
@@ -892,6 +899,7 @@ def _sign_compaction_marker(
         range_start=range_start,
         range_end=range_end,
     )
+    marker_signature = active.sign(marker_sig_payload)
 
     marker_payload = {
         "archive_format_version": ARCHIVE_FORMAT_VERSION,
@@ -910,14 +918,18 @@ def _sign_compaction_marker(
         metadata={COMPACTION_MARKER_FIELD: marker_payload},
     )
 
-    # First pass: tentative HMAC for anchor submission.
+    stamped: dict[str, str] = {KEY_ID_FIELD: active.key_id}
+    if active.algorithm != ALG_HMAC_SHA256:
+        stamped[ALG_FIELD] = active.algorithm
+
+    # First pass: tentative signature for anchor submission.
     tentative = replace(
         marker_entry,
-        metadata={**marker_entry.metadata, KEY_ID_FIELD: active.key_id},
+        metadata={**marker_entry.metadata, **stamped},
         prev_hmac=prev_hmac,
     )
     tentative_payload = _serialize_for_signing(tentative)
-    tentative_hmac = _hmac.new(active.secret, tentative_payload, hashlib.sha256).hexdigest()
+    tentative_hmac = active.sign(tentative_payload)
 
     try:
         anchor_receipt = chain._anchor.anchor_hmac(tentative_hmac)
@@ -938,7 +950,7 @@ def _sign_compaction_marker(
 
     anchored_metadata = {
         **marker_entry.metadata,
-        KEY_ID_FIELD: active.key_id,
+        **stamped,
         ANCHOR_FIELD: anchor_receipt.to_dict(),
     }
     anchored = replace(
@@ -947,7 +959,7 @@ def _sign_compaction_marker(
         prev_hmac=prev_hmac,
     )
     payload = _serialize_for_signing(anchored)
-    final_hmac = _hmac.new(active.secret, payload, hashlib.sha256).hexdigest()
+    final_hmac = active.sign(payload)
     return anchored.with_chain_links(prev_hmac=prev_hmac, hmac=final_hmac)
 
 
@@ -1132,22 +1144,19 @@ def is_compaction_marker(
         range_end = str(marker["range_end"])
     except (KeyError, TypeError, ValueError):
         return False
-    import hmac as _hmac
-
+    marker_sig_payload = _marker_signature_payload(
+        archive_format_version=archive_format_version,
+        archive_path=archive_path,
+        compacted_count=compacted_count,
+        merkle_root=merkle_root,
+        range_start=range_start,
+        range_end=range_end,
+    )
     for key_id in keyring.all_known_ids():
         key = keyring.get(key_id)
         if key is None:
             continue
-        candidate = _compute_marker_signature(
-            secret=key.secret,
-            archive_format_version=archive_format_version,
-            archive_path=archive_path,
-            compacted_count=compacted_count,
-            merkle_root=merkle_root,
-            range_start=range_start,
-            range_end=range_end,
-        )
-        if _hmac.compare_digest(candidate, expected):
+        if key.verify(marker_sig_payload, expected):
             return True
     return False
 

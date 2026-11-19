@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from signet.audit.backend import MalformedAuditEntry
 from signet.audit.chain import (
+    ALG_FIELD,
     CANON_JCS_V1,
     CANON_LEGACY,
     SEQ_FIELD,
@@ -43,9 +44,18 @@ from signet.audit.compactor import (
     read_archive,
     trim_before_index,
 )
+from signet.audit.keyring import (
+    ALG_ED25519,
+    ALG_HMAC_SHA256,
+    Ed25519Key,
+    Key,
+    KeyRing,
+    SigningKey,
+)
 from signet.audit.verifier import (
     BreakKind,
     ChainBreak,
+    ChainCheckpoint,
     ChainVerifier,
     ContiguityGap,
     ContiguityReport,
@@ -55,6 +65,9 @@ from signet.audit.verifier import (
 )
 
 __all__: list[str] = [
+    "ALG_ED25519",
+    "ALG_FIELD",
+    "ALG_HMAC_SHA256",
     "ARCHIVE_FORMAT_VERSION",
     "CANON_JCS_V1",
     "CANON_LEGACY",
@@ -64,13 +77,18 @@ __all__: list[str] = [
     "ArchiveHeader",
     "BreakKind",
     "ChainBreak",
+    "ChainCheckpoint",
     "ChainVerifier",
     "CompactionResult",
     "ContiguityGap",
     "ContiguityReport",
+    "Ed25519Key",
     "HmacChain",
+    "Key",
+    "KeyRing",
     "MalformedAuditEntry",
     "MerkleTree",
+    "SigningKey",
     "VerificationReport",
     "compact_audit_log",
     "is_compaction_marker",

@@ -230,12 +230,14 @@ class AuditEntry:
         # has empty ``hmac`` / ``prev_hmac`` before the chain writer
         # fills them in.
         _HEX_DIGITS = "0123456789abcdef"
+        _VALID_SIG_HEX_LENS = (64, 128)  # 32-byte HMAC-SHA256 (64) or 64-byte Ed25519 (128)
         for name, val in (("hmac", hmac_val), ("prev_hmac", prev_hmac_val)):
             if val == "":
                 continue
-            if len(val) != 64:
+            if len(val) not in _VALID_SIG_HEX_LENS:
                 raise ValueError(
-                    f"{name} must be 64 hex chars (32-byte SHA-256), got length {len(val)}"
+                    f"{name} must be 64 hex chars (HMAC-SHA256) or 128 hex chars (Ed25519), "
+                    f"got length {len(val)}"
                 )
             if not all(c in _HEX_DIGITS for c in val):
                 raise ValueError(f"{name} must be lowercase hex, got non-hex chars")

@@ -442,6 +442,82 @@ class JsonlBackend:
                         parse_error=(f"schema validation failed: {type(exc).__name__}: {exc}"),
                     ) from exc
 
+    def file_size(self) -> int:
+        """Current byte size of the underlying JSONL log (0 if missing)."""
+        if not self._path.exists():
+            return 0
+        return self._path.stat().st_size
+
+    def iter_entries_from_offset(
+        self,
+        byte_offset: int,
+        *,
+        start_line: int = 1,
+    ) -> Iterator[tuple[AuditEntry, int]]:
+        """Yield ``(entry, end_byte_offset)`` starting from ``byte_offset``.
+
+        Used by :meth:`signet.audit.verifier.ChainVerifier.verify_incremental`
+        for O(delta) tail verification without re-reading historical entries.
+        Raises :class:`ValueError` if ``byte_offset`` is negative or exceeds
+        the current file size (which indicates log truncation).
+        """
+        if byte_offset < 0:
+            raise ValueError(f"byte_offset must be >= 0 (got {byte_offset})")
+        if not self._path.exists():
+            if byte_offset > 0:
+                raise ValueError(f"byte_offset {byte_offset} exceeds missing log file size 0")
+            return
+        size = self._path.stat().st_size
+        if byte_offset > size:
+            raise ValueError(
+                f"byte_offset {byte_offset} exceeds current log file size {size} (log truncated)"
+            )
+        with self._path.open("rb") as f:
+            if byte_offset == 0:
+                first = f.read(3)
+                if first != b"\xef\xbb\xbf":
+                    f.seek(0)
+            else:
+                f.seek(byte_offset)
+            line_number = start_line
+            while True:
+                raw_bytes = f.readline()
+                if not raw_bytes:
+                    break
+                end_offset = f.tell()
+                try:
+                    stripped = raw_bytes.decode("utf-8").strip()
+                except UnicodeDecodeError as exc:
+                    raise MalformedAuditEntry(
+                        line_number=line_number,
+                        raw_line=repr(raw_bytes[:200]),
+                        parse_error=f"line is not valid UTF-8: {exc}",
+                    ) from exc
+                if not stripped:
+                    line_number += 1
+                    continue
+                try:
+                    data = json.loads(
+                        stripped,
+                        parse_constant=_reject_non_finite_json_constants,
+                    )
+                except (json.JSONDecodeError, ValueError) as exc:
+                    raise MalformedAuditEntry(
+                        line_number=line_number,
+                        raw_line=stripped,
+                        parse_error=str(exc),
+                    ) from exc
+                try:
+                    entry = AuditEntry.from_dict(data)
+                except (KeyError, ValueError, TypeError) as exc:
+                    raise MalformedAuditEntry(
+                        line_number=line_number,
+                        raw_line=stripped,
+                        parse_error=(f"schema validation failed: {type(exc).__name__}: {exc}"),
+                    ) from exc
+                yield entry, end_offset
+                line_number += 1
+
     def last_entry(self) -> AuditEntry | None:
         # JSONL doesn't support efficient seek-to-last without indexing.
         # For the volumes JsonlBackend targets, a linear scan is acceptable;
