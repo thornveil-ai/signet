@@ -490,7 +490,9 @@ def serve(
     # If we generated an ephemeral key, print it as hex so the user can
     # save it for post-mortem `signet audit verify`. Otherwise the audit
     # log we just spent the run building is unverifiable forever.
-    if allow_ephemeral_key and not hmac_secret:
+    from signet.audit.keyring import Key
+
+    if allow_ephemeral_key and not hmac_secret and isinstance(signet_app._keyring.active, Key):
         ephemeral_hex = signet_app._keyring.active.secret.hex()
         click.secho(
             "EPHEMERAL HMAC KEY (save this if you want to verify the audit log later):",

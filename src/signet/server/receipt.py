@@ -47,7 +47,7 @@ import hmac
 from typing import TYPE_CHECKING, Any, Protocol
 
 from signet.audit.chain import _serialize_for_signing
-from signet.audit.keyring import KeyRing
+from signet.audit.keyring import Key, KeyRing
 from signet.core.audit import AuditEntry
 
 if TYPE_CHECKING:
@@ -117,6 +117,11 @@ class HmacReceiptSigner:
         so verifiers can correlate the receipt with chain state.
         """
         active = self._keyring.active
+        if not isinstance(active, Key):
+            raise TypeError(
+                f"HmacReceiptSigner requires a symmetric HMAC Key, got {type(active).__name__}; "
+                "use Ed25519ReceiptSigner for Ed25519 keys"
+            )
         payload = _serialize_for_signing(entry)
         sig = hmac.new(active.secret, payload, hashlib.sha256).hexdigest()
         return _HEADER_FORMAT.format(
@@ -147,7 +152,7 @@ class HmacReceiptSigner:
         if parsed["entry"] != entry.entry_id:
             return False
         key = self._keyring.get(parsed["key"])
-        if key is None:
+        if not isinstance(key, Key):
             return False
         payload = _serialize_for_signing(entry)
         expected = hmac.new(key.secret, payload, hashlib.sha256).hexdigest()
