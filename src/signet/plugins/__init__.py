@@ -100,19 +100,29 @@ def resolve(name: str, *, group: str = "signet.checks") -> type[Check]:
         raise KeyError(
             f"no signet plugin named {name!r} in group {group!r}; known plugins: {', '.join(known)}"
         )
-    plugin = matches[0]
-    if plugin.status == "duplicate_name":
+    for candidate in matches:
+        if candidate.status == "duplicate_name":
+            raise RuntimeError(
+                f"signet plugin {name!r} ({group}) has duplicate "
+                f"registrations: {candidate.duplicate_with}; resolve "
+                f"ambiguity by uninstalling the conflicting package"
+            )
+    if len(matches) > 1:
         raise RuntimeError(
-            f"signet plugin {name!r} ({group}) has duplicate "
-            f"registrations: {plugin.duplicate_with}; resolve "
-            f"ambiguity by uninstalling the conflicting package"
+            f"signet plugin {name!r} ({group}) has {len(matches)} conflicting "
+            f"registrations; resolve ambiguity by uninstalling the conflicting package"
         )
+    plugin = matches[0]
     if plugin.status != "loaded":
         raise RuntimeError(
             f"signet plugin {name!r} ({group}) is unavailable "
             f"[status={plugin.status}]: {plugin.error}"
         )
-    assert plugin.obj is not None  # status == "loaded" implies obj set
+    if plugin.obj is None:
+        raise RuntimeError(
+            f"signet plugin {name!r} ({group}) reported status 'loaded' "
+            f"without a bound class object"
+        )
     # ``plugin.obj`` is ``Any`` on the dataclass. The status check above
     # guarantees discovery validated it as a ``type[Check]``; the cast
     # makes the return-type narrowing explicit for mypy.

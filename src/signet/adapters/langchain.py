@@ -33,6 +33,7 @@ underlying OpenAI client.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from uuid import UUID
 
@@ -87,19 +88,40 @@ class SignetCallbackHandler:
         (``{"error": "signet refused this request", "reason": ...}``,
         the historical / ``--no-strict-error-redaction`` shape).
         """
-        # Try to pull JSON body off common HTTP-error shapes
-        body = getattr(error, "body", None) or getattr(error, "response", None)
-        if body is not None and hasattr(body, "json"):
-            try:
-                payload = body.json()
-            except Exception:
-                payload = None
-            if isinstance(payload, dict):
-                err = payload.get("error", "")
-                # "refused" is the strict-mode marker; "signet refused..."
-                # is the legacy verbose marker.
-                if err == "refused" or err.startswith("signet refused"):
-                    self.last_refusal = payload
+        # Try to pull JSON body off common HTTP-error shapes:
+        #   - OpenAI / Anthropic APIStatusError expose ``error.body`` as a
+        #     parsed ``dict`` or raw JSON ``str``/``bytes``, plus an
+        #     ``httpx.Response`` on ``error.response``.
+        #   - ``httpx.HTTPStatusError`` exposes ``error.response.json()``.
+        payload: Any = None
+        for candidate in (getattr(error, "body", None), getattr(error, "response", None)):
+            if candidate is None:
+                continue
+            if isinstance(candidate, dict):
+                payload = candidate
+                break
+            if isinstance(candidate, (str, bytes)):
+                try:
+                    parsed = json.loads(candidate)
+                except (ValueError, TypeError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    payload = parsed
+                    break
+            elif hasattr(candidate, "json"):
+                try:
+                    parsed = candidate.json()
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    payload = parsed
+                    break
+        if isinstance(payload, dict):
+            err = payload.get("error", "")
+            # "refused" is the strict-mode marker; "signet refused..."
+            # is the legacy verbose marker.
+            if isinstance(err, str) and (err == "refused" or err.startswith("signet refused")):
+                self.last_refusal = payload
 
     @staticmethod
     def _extract_receipt(response: Any, extras: dict[str, Any]) -> str | None:

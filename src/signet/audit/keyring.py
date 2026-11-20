@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -272,6 +273,9 @@ class KeyRing:
 
     _active: SigningKey
     _legacy: dict[str, SigningKey] = field(default_factory=dict)
+    _lock: threading.RLock = field(
+        default_factory=threading.RLock, init=False, repr=False, compare=False
+    )
 
     def __init__(
         self,
@@ -280,6 +284,7 @@ class KeyRing:
         keys: list[SigningKey] | dict[str, SigningKey] | dict[str, bytes] | None = None,
         active_id: str | None = None,
     ) -> None:
+        self._lock = threading.RLock()
         if active is not None:
             if keys is not None or active_id is not None:
                 raise ValueError("pass either active= or (keys=, active_id=), not both")
@@ -325,13 +330,15 @@ class KeyRing:
     @property
     def active(self) -> SigningKey:
         """The current signing key. New entries are signed with this key."""
-        return self._active
+        with self._lock:
+            return self._active
 
     def get(self, key_id: str) -> SigningKey | None:
         """Look up a key by ID. Returns ``None`` if no such key is known."""
-        if key_id == self._active.key_id:
-            return self._active
-        return self._legacy.get(key_id)
+        with self._lock:
+            if key_id == self._active.key_id:
+                return self._active
+            return self._legacy.get(key_id)
 
     def add_legacy(self, key: SigningKey) -> None:
         """Register a previous-era key for verification only.
@@ -339,11 +346,14 @@ class KeyRing:
         The added key is not used for signing. Raises :class:`ValueError`
         if a key with the same ID is already registered.
         """
-        if key.key_id == self._active.key_id:
-            raise ValueError(f"Cannot add legacy key with same ID as active key: {key.key_id!r}")
-        if key.key_id in self._legacy:
-            raise ValueError(f"Legacy key {key.key_id!r} already registered")
-        self._legacy[key.key_id] = key
+        with self._lock:
+            if key.key_id == self._active.key_id:
+                raise ValueError(
+                    f"Cannot add legacy key with same ID as active key: {key.key_id!r}"
+                )
+            if key.key_id in self._legacy:
+                raise ValueError(f"Legacy key {key.key_id!r} already registered")
+            self._legacy[key.key_id] = key
 
     def rotate(self, new_active: SigningKey) -> None:
         """Promote ``new_active`` to the signing role; demote the previous
@@ -352,12 +362,15 @@ class KeyRing:
         Raises :class:`ValueError` if ``new_active`` already exists in the
         ring under any role.
         """
-        if new_active.key_id == self._active.key_id:
-            raise ValueError(f"New active key has same ID as current active: {new_active.key_id!r}")
-        if new_active.key_id in self._legacy:
-            raise ValueError(f"New active key {new_active.key_id!r} already exists as legacy")
-        self._legacy[self._active.key_id] = self._active
-        self._active = new_active
+        with self._lock:
+            if new_active.key_id == self._active.key_id:
+                raise ValueError(
+                    f"New active key has same ID as current active: {new_active.key_id!r}"
+                )
+            if new_active.key_id in self._legacy:
+                raise ValueError(f"New active key {new_active.key_id!r} already exists as legacy")
+            self._legacy[self._active.key_id] = self._active
+            self._active = new_active
 
     def public_ring(self) -> KeyRing:
         """Return a verify-only KeyRing with all Ed25519 private keys stripped.
@@ -367,22 +380,24 @@ class KeyRing:
         if the ring contains any symmetric HMAC :class:`Key` (which has no
         public-only form).
         """
-        if not isinstance(self._active, Ed25519Key):
-            raise ValueError(
-                f"Active key {self._active.key_id!r} is symmetric ({self._active.algorithm}); "
-                "public_ring() only supports asymmetric Ed25519Key rings"
-            )
-        pub_keys: list[SigningKey] = [self._active.public_only()]
-        for k in self._legacy.values():
-            if not isinstance(k, Ed25519Key):
+        with self._lock:
+            if not isinstance(self._active, Ed25519Key):
                 raise ValueError(
-                    f"Legacy key {k.key_id!r} is symmetric ({k.algorithm}); "
-                    "public_ring() refuses to export symmetric secrets"
+                    f"Active key {self._active.key_id!r} is symmetric ({self._active.algorithm}); "
+                    "public_ring() only supports asymmetric Ed25519Key rings"
                 )
-            pub_keys.append(k.public_only())
-        return KeyRing(keys=pub_keys, active_id=self._active.key_id)
+            pub_keys: list[SigningKey] = [self._active.public_only()]
+            for k in self._legacy.values():
+                if not isinstance(k, Ed25519Key):
+                    raise ValueError(
+                        f"Legacy key {k.key_id!r} is symmetric ({k.algorithm}); "
+                        "public_ring() refuses to export symmetric secrets"
+                    )
+                pub_keys.append(k.public_only())
+            return KeyRing(keys=pub_keys, active_id=self._active.key_id)
 
     def all_known_ids(self) -> tuple[str, ...]:
         """All key IDs currently in the ring (active + legacy), in
         insertion order with the active key first."""
-        return (self._active.key_id, *self._legacy.keys())
+        with self._lock:
+            return (self._active.key_id, *self._legacy.keys())

@@ -55,6 +55,7 @@ docs/_build/
 *.pem
 
 # signet runtime
+audit.jsonl
 *.audit.jsonl
 .signet-audit/
 growth/

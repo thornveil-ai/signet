@@ -118,7 +118,7 @@ class HmacChain:
         *,
         anchor: AnchorBackend | None = None,
         require_anchor_success: bool = False,
-        cache_prev: bool = True,
+        cache_prev: bool | None = None,
         sequence: bool = False,
         canon: str = CANON_LEGACY,
     ) -> None:
@@ -142,12 +142,23 @@ class HmacChain:
         # Last sequence number written, cached alongside _cached_prev so
         # sequential single-process appends don't rescan the backend.
         self._cached_seq: int | None = None
-        # When True (default, single-process), cache the last entry's
-        # HMAC so we don't scan the backend on every append. Set False
-        # when running multiple writers against a FileLockingJsonlBackend
-        # -- each append then re-reads the chain head under the
-        # cross-process lock so workers stay consistent.
-        self._cache_prev = cache_prev
+        # When True (single-process default), cache the last entry's HMAC
+        # so we don't scan the backend on every append. When backed by a
+        # cross-process locking backend (``append_locked_with_link``),
+        # default to False so multi-worker deployments automatically use
+        # the atomic lock-and-link path instead of risking stale-prev forks.
+        has_atomic_link = hasattr(backend, "append_locked_with_link")
+        if cache_prev is None:
+            resolved_cache_prev = not has_atomic_link
+        else:
+            resolved_cache_prev = cache_prev
+            if resolved_cache_prev and has_atomic_link:
+                logger.warning(
+                    "HmacChain constructed with cache_prev=True over %s; "
+                    "multi-worker appends can fork the chain unless cache_prev=False",
+                    type(backend).__name__,
+                )
+        self._cache_prev = resolved_cache_prev
         self._cached_prev: str | None = None
         # Serialize concurrent appends. Required because two coroutines
         # racing through read_prev → compute → write would otherwise both

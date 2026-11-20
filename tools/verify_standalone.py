@@ -137,41 +137,46 @@ def verify_chain(
     prev_hmac = ""
     seqs: list[int] = []
     total = 0
-    with open(log_path, encoding="utf-8") as fh:
-        for lineno, raw in enumerate(fh):
-            raw = raw.strip()
-            if not raw:
-                continue
-            total += 1
-            try:
-                d = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                breaks.append(f"line {lineno + 1}: not valid JSON: {exc}")
-                break
-            ent_hmac = d.get("hmac", "")
-            ent_prev = d.get("prev_hmac", "")
-            # Link check.
-            if ent_prev != prev_hmac:
-                breaks.append(
-                    f"line {lineno + 1}: link_mismatch (prev_hmac does not "
-                    f"match previous entry's hmac) -- insertion/deletion/reorder"
-                )
-            # Key + self HMAC check.
-            meta = d.get("metadata") or {}
-            ent_key = meta.get(KEY_ID_FIELD)
-            if ent_key != key_id:
-                breaks.append(
-                    f"line {lineno + 1}: signed with key_id={ent_key!r}, expected {key_id!r}"
-                )
-            else:
-                expected = hmac.new(secret, serialize_for_signing(d), hashlib.sha256).hexdigest()
-                if not hmac.compare_digest(expected, str(ent_hmac)):
-                    breaks.append(f"line {lineno + 1}: self_mismatch (entry was modified)")
-            # Collect sequence numbers for the contiguity pass.
-            s = meta.get(SEQ_FIELD)
-            if isinstance(s, int) and not isinstance(s, bool):
-                seqs.append(s)
-            prev_hmac = str(ent_hmac)
+    try:
+        with open(log_path, encoding="utf-8") as fh:
+            for lineno, raw in enumerate(fh):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                total += 1
+                try:
+                    d = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    breaks.append(f"line {lineno + 1}: not valid JSON: {exc}")
+                    break
+                ent_hmac = d.get("hmac", "")
+                ent_prev = d.get("prev_hmac", "")
+                # Link check.
+                if ent_prev != prev_hmac:
+                    breaks.append(
+                        f"line {lineno + 1}: link_mismatch (prev_hmac does not "
+                        f"match previous entry's hmac) -- insertion/deletion/reorder"
+                    )
+                # Key + self HMAC check.
+                meta = d.get("metadata") or {}
+                ent_key = meta.get(KEY_ID_FIELD)
+                if ent_key != key_id:
+                    breaks.append(
+                        f"line {lineno + 1}: signed with key_id={ent_key!r}, expected {key_id!r}"
+                    )
+                else:
+                    expected = hmac.new(
+                        secret, serialize_for_signing(d), hashlib.sha256
+                    ).hexdigest()
+                    if not hmac.compare_digest(expected, str(ent_hmac)):
+                        breaks.append(f"line {lineno + 1}: self_mismatch (entry was modified)")
+                # Collect sequence numbers for the contiguity pass.
+                s = meta.get(SEQ_FIELD)
+                if isinstance(s, int) and not isinstance(s, bool):
+                    seqs.append(s)
+                prev_hmac = str(ent_hmac)
+    except OSError as exc:
+        raise SystemExit(f"cannot open audit log {log_path!r}: {exc}") from None
 
     # Contiguity pass over collected sequence numbers.
     gaps: list[str] = []
@@ -230,9 +235,18 @@ def parse_receipt(header_value: str) -> dict[str, str] | None:
 def verify_receipt(args: argparse.Namespace) -> bool:
     entry_raw = args.entry
     if entry_raw.startswith("@"):
-        with open(entry_raw[1:], encoding="utf-8") as fh:
-            entry_raw = fh.read()
-    entry = json.loads(entry_raw)
+        entry_path = entry_raw[1:]
+        try:
+            with open(entry_path, encoding="utf-8") as fh:
+                entry_raw = fh.read()
+        except OSError as exc:
+            raise SystemExit(f"cannot open entry file {entry_path!r}: {exc}") from None
+    try:
+        entry = json.loads(entry_raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"--entry is not valid JSON: {exc}") from None
+    if not isinstance(entry, dict):
+        raise SystemExit("--entry must decode to a JSON object")
     parsed = parse_receipt(args.header)
     if parsed is None:
         print("receipt header is malformed or not v1", file=sys.stderr)
@@ -249,7 +263,11 @@ def verify_receipt(args: argparse.Namespace) -> bool:
     if alg == "hmac-sha256":
         if not args.secret:
             raise SystemExit("hmac-sha256 receipts need --secret <hex>")
-        expected = hmac.new(bytes.fromhex(args.secret), payload, hashlib.sha256).hexdigest()
+        try:
+            secret_bytes = bytes.fromhex(args.secret)
+        except ValueError:
+            raise SystemExit("--secret must be valid hex") from None
+        expected = hmac.new(secret_bytes, payload, hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, parsed["sig"])
 
     if alg == "ed25519":
@@ -258,10 +276,17 @@ def verify_receipt(args: argparse.Namespace) -> bool:
         from cryptography.exceptions import InvalidSignature
         from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
-        with open(args.pub_pem, "rb") as fh:
-            pub = load_pem_public_key(fh.read())
         try:
-            pub.verify(bytes.fromhex(parsed["sig"]), payload)  # type: ignore[call-arg]
+            with open(args.pub_pem, "rb") as fh:
+                pub = load_pem_public_key(fh.read())
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"cannot load --pub-pem {args.pub_pem!r}: {exc}") from None
+        try:
+            sig_bytes = bytes.fromhex(parsed["sig"])
+        except ValueError:
+            return False
+        try:
+            pub.verify(sig_bytes, payload)  # type: ignore[call-arg]
             return True
         except InvalidSignature:
             return False
@@ -271,8 +296,11 @@ def verify_receipt(args: argparse.Namespace) -> bool:
             raise SystemExit("ml-dsa-65 receipts need --pub-raw <file>")
         from dilithium_py.ml_dsa import ML_DSA_65
 
-        with open(args.pub_raw, "rb") as fh:
-            pub_bytes = fh.read()
+        try:
+            with open(args.pub_raw, "rb") as fh:
+                pub_bytes = fh.read()
+        except OSError as exc:
+            raise SystemExit(f"cannot open --pub-raw {args.pub_raw!r}: {exc}") from None
         try:
             return bool(ML_DSA_65.verify(pub_bytes, payload, bytes.fromhex(parsed["sig"])))
         except Exception:
