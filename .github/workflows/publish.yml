@@ -84,7 +84,7 @@ jobs:
               oidc_jwt = json.loads(r.read().decode())["value"]
 
           mint = urllib.request.Request(
-              "https://pypi.org/account/oidc/mint-token",
+              "https://pypi.org/_/oidc/mint-token",
               data=json.dumps({"token": oidc_jwt}).encode(),
               headers={"Content-Type": "application/json"},
               method="POST",
