@@ -8,6 +8,14 @@ pre-1.0 minor versions may break the API.
 
 ## [Unreleased]
 
+## [0.1.13] -- 2026-11-19
+
+### Security & Hardening (#15)
+
+- **Audit Compaction & Multi-Worker Chain Safety:** Acquired `exclusive_log_lock(backend.path)` in `trim_before_index()`, cleared cached prev/seq under `chain._lock`, defaulted `HmacChain(..., cache_prev=None)` to `False` on file-locking backends, passed `cache_prev=False` in `signet audit compact`, and protected `KeyRing` reads/mutations with `threading.RLock`.
+- **Verifier & Receipt Hardening:** Validated `marker_meta` and `compacted_count` in `verify_with_archives()` (recording structured `BreakKind.ARCHIVE_FORMAT_INVALID` instead of raising), and failed closed with `None` in `receipt.parse_header()` on non-string inputs.
+- **Adapters, Redis Store, Plugins & Standalone Verifier:** Hardened LangChain adapter error body parsing, Redis session store, plugin resolution, CLI diagnostics, `tools/verify_standalone.py`, and OIDC query-string construction in `.github/workflows/publish.yml`. Added comprehensive regression coverage in `tests/unit/test_audit_remediation.py`.
+
 ## [0.1.12] -- 2026-11-19
 
 ### Added

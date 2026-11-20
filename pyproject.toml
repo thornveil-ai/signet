@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "signet-sign"
-version = "0.1.12"
+version = "0.1.13"
 description = "Capability-based safety gates for LLM agents. The model proposes; signet authorizes."
 readme = "README.md"
 requires-python = ">=3.11"
