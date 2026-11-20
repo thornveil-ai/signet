@@ -551,6 +551,8 @@ def parse_header(value: str) -> dict[str, str] | None:
     Returns ``None`` when required fields are absent or the version
     is not v1.
     """
+    if not isinstance(value, str):
+        return None
     fields: dict[str, str] = {}
     for part in value.split(";"):
         part = part.strip()

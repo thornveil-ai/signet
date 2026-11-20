@@ -70,9 +70,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip twine
           python - <<'PY'
-          import json, os, subprocess, urllib.request
+          import json, os, subprocess, urllib.parse, urllib.request
 
-          req_url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=pypi"
+          parsed = urllib.parse.urlsplit(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"])
+          query_items = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+          query_items.append(("audience", "pypi"))
+          req_url = urllib.parse.urlunsplit(
+              parsed._replace(query=urllib.parse.urlencode(query_items))
+          )
           req_tok = os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
           req = urllib.request.Request(req_url, headers={"Authorization": f"Bearer {req_tok}"})
           with urllib.request.urlopen(req, timeout=30) as r:

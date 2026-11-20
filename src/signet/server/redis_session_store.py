@@ -106,9 +106,19 @@ class RedisSessionStore:
         existing = self.get(session_id)
         if existing is not None:
             return existing
-        new = Session(session_id=session_id, created_at=time.time(), last_seen_at=time.time())
-        self.save(new)
-        return new
+        now = time.time()
+        new = Session(session_id=session_id, created_at=now, last_seen_at=now)
+        key = self._key(session_id)
+        payload = self._serialize(new)
+        if self._ttl is not None:
+            created = self._client.set(key, payload, ex=self._ttl, nx=True)
+        else:
+            created = self._client.set(key, payload, nx=True)
+        if created:
+            return new
+        # Another replica created the session between our initial GET and SET NX.
+        raced = self.get(session_id)
+        return raced if raced is not None else new
 
     def save(self, session: Session) -> None:
         key = self._key(session.session_id)

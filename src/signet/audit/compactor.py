@@ -1026,20 +1026,22 @@ def trim_before_index(
     """
     if index < 0:
         raise ValueError(f"trim_before_index: index must be >= 0, got {index}")
-    entries = list(backend.iter_entries())
-    if index >= len(entries):
-        # Trim everything: empty file. Operators usually won't want this,
-        # but the result is well-defined.
-        retained: list[AuditEntry] = []
-    else:
-        retained = entries[index:]
-    _atomic_rewrite_live_log(backend=backend, new_entries=retained)
-    # Round 7 MED-1: clear the chain's stale prev cache so the next
-    # ``append`` re-reads the (now-truncated) tail from disk. Mirrors
-    # ``compact_audit_log``'s post-rewrite invalidation at the bottom of
-    # the with-lock block.
-    if chain is not None:
-        chain._cached_prev = None
+    with exclusive_log_lock(backend.path):
+        entries = list(backend.iter_entries())
+        if index >= len(entries):
+            # Trim everything: empty file. Operators usually won't want this,
+            # but the result is well-defined.
+            retained: list[AuditEntry] = []
+        else:
+            retained = entries[index:]
+        _atomic_rewrite_live_log(backend=backend, new_entries=retained)
+        # Clear both prev-HMAC and sequence caches so the next ``append``
+        # re-reads the (now-truncated) tail from disk. Mirrors
+        # ``compact_audit_log``'s post-rewrite invalidation.
+        if chain is not None:
+            with chain._lock:
+                chain._cached_prev = None
+                chain._cached_seq = None
     return len(retained)
 
 

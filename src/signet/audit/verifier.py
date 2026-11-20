@@ -988,9 +988,50 @@ def verify_with_archives(
             # last hmac to use both for the marker's own link check and
             # for the bridge to the next live entry.
             marker_meta = entry.metadata[COMPACTION_MARKER_FIELD]
+            if not isinstance(marker_meta, dict):
+                breaks.append(
+                    ChainBreak(
+                        index=logical_index,
+                        entry_id=entry.entry_id,
+                        kind=BreakKind.ARCHIVE_FORMAT_INVALID,
+                        detail=(
+                            f"compaction marker metadata {COMPACTION_MARKER_FIELD!r} "
+                            f"must be a mapping, got {type(marker_meta).__name__}"
+                        ),
+                    )
+                )
+                total_entries += 1
+                logical_index += 1
+                expected_prev = entry.hmac
+                continue
             archive_path_str = str(marker_meta.get("archive_path", ""))
             claimed_root = str(marker_meta.get("merkle_root", ""))
-            claimed_count = int(marker_meta.get("compacted_count", 0))
+            raw_claimed_count = marker_meta.get("compacted_count", 0)
+            if isinstance(raw_claimed_count, bool):
+                claimed_count_valid = False
+                claimed_count = 0
+            else:
+                try:
+                    claimed_count = int(raw_claimed_count)
+                    claimed_count_valid = claimed_count >= 0
+                except (TypeError, ValueError):
+                    claimed_count_valid = False
+                    claimed_count = 0
+            if not claimed_count_valid:
+                breaks.append(
+                    ChainBreak(
+                        index=logical_index,
+                        entry_id=entry.entry_id,
+                        kind=BreakKind.ARCHIVE_FORMAT_INVALID,
+                        detail=(
+                            f"compaction marker has invalid compacted_count: {raw_claimed_count!r}"
+                        ),
+                    )
+                )
+                total_entries += 1
+                logical_index += 1
+                expected_prev = entry.hmac
+                continue
 
             # Resolve the archive: try the absolute path embedded in the
             # marker first, then fall back to archive_dir/<basename>. This

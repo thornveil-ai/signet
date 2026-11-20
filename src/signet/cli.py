@@ -940,12 +940,17 @@ def doctor(
         base = signet_url.rstrip("/")
         try:
             health = httpx.get(f"{base}/health", timeout=5.0)
-            if health.status_code == 200 and health.json().get("status") == "ok":
+            health_body = health.json()
+            if (
+                health.status_code == 200
+                and isinstance(health_body, dict)
+                and health_body.get("status") == "ok"
+            ):
                 click.secho("  /health         ok", fg="green")
             else:
                 click.secho(f"  /health         unexpected ({health.status_code})", fg="red")
                 failed = True
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ValueError) as exc:
             click.secho(
                 f"  /health         unreachable: {_sanitize_for_terminal(exc)}",
                 fg="red",
@@ -968,7 +973,7 @@ def doctor(
                 _sanitize_for_terminal(ver.get("version", "?")) if isinstance(ver, dict) else "?"
             )
             click.secho(f"  /version        signet {ver_str}", fg="green")
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ValueError) as exc:
             click.secho(
                 f"  /version        unreachable: {_sanitize_for_terminal(exc)}",
                 fg="red",
@@ -1571,9 +1576,10 @@ def audit_verify_contiguity(
     )
 
     try:
-        integrity = ChainVerifier(_open_jsonl_backend(log_path), keyring).verify()
+        backend = _open_jsonl_backend(log_path)
+        integrity = ChainVerifier(backend, keyring).verify()
         contiguity = verify_contiguity(
-            _open_jsonl_backend(log_path),
+            backend,
             expected_start=expect_start,
             expected_end=expect_end,
         )
@@ -1991,7 +1997,7 @@ def audit_compact(
     from signet.audit.backend import MalformedAuditEntry
 
     backend = _open_jsonl_backend(audit_log_path)
-    chain = HmacChain(backend, keyring)
+    chain = HmacChain(backend, keyring, cache_prev=False)
 
     # ``compact_audit_log`` raises ``FileExistsError`` when output
     # exists and ``force`` is False, and ``ValueError`` for other
@@ -3645,7 +3651,7 @@ def _doctor_autodetect(
 
     if upstream_url is None:
         for candidate in (Path(".env"), Path(".env.example")):
-            if not candidate.exists():
+            if candidate.is_symlink() or not candidate.exists():
                 continue
             value = _read_env_var(candidate, "SIGNET_UPSTREAM_URL")
             if value:
@@ -3679,6 +3685,8 @@ def _read_env_var(path: Path, key: str) -> str | None:
     full python-dotenv grammar (no escapes, no multi-line) -- those are
     not what ``signet init`` writes.
     """
+    if path.is_symlink():
+        return None
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
