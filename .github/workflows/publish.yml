@@ -67,10 +67,12 @@ jobs:
           name: dist
           path: dist/
       - name: Publish to PyPI (Trusted Publishing via OIDC)
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         run: |
           python -m pip install --upgrade pip twine
           python - <<'PY'
-          import json, os, subprocess, urllib.parse, urllib.request
+          import json, os, subprocess, sys, urllib.error, urllib.parse, urllib.request
 
           parsed = urllib.parse.urlsplit(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"])
           query_items = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
@@ -89,8 +91,18 @@ jobs:
               headers={"Content-Type": "application/json"},
               method="POST",
           )
-          with urllib.request.urlopen(mint, timeout=30) as r:
-              pypi_token = json.loads(r.read().decode())["token"]
+          pypi_token = None
+          try:
+              with urllib.request.urlopen(mint, timeout=30) as r:
+                  pypi_token = json.loads(r.read().decode())["token"]
+              print("Minted short-lived PyPI OIDC Trusted Publishing token.")
+          except urllib.error.HTTPError as exc:
+              detail = exc.read().decode("utf-8", "replace")
+              print(f"::warning::PyPI OIDC mint-token returned HTTP {exc.code}: {detail}")
+              pypi_token = os.environ.get("PYPI_API_TOKEN") or None
+              if not pypi_token:
+                  sys.exit(1)
+              print("Falling back to PYPI_API_TOKEN secret.")
 
           env = {**os.environ, "TWINE_USERNAME": "__token__", "TWINE_PASSWORD": pypi_token}
           subprocess.run(["python", "-m", "twine", "upload", "--non-interactive", "dist/*"], env=env, check=True)
